@@ -44,15 +44,33 @@ It helps you **track**, **analyze**, and **optimize** your expenses — with sma
 
     ExpenX/
     │
-    ├── main.py                  # CLI runner (Phase 1)
-    ├── expense_tracker.py       # Core logic
-    ├── db/                      # SQLite or CSV storage
-    ├── utils/                   # Helpers: categorization, analyzers, etc.
-    ├── static/                  # For Flask UI (images, css, js)
-    ├── templates/               # Flask HTML templates
-    ├── uploads/                 # Bank statements, receipts
+    ├── app/                         # Core logic
+    │   ├── __init__.py
+    │   ├── tracker.py               # Add/view expenses
+    │   ├── categorizer.py           # ML-based auto categorization
+    │   ├── visualizer.py            # Charts, summaries
+    │   ├── recurring.py             # Recurring expense tracker
+    │   └── parser.py                # UPI/Bank statement parser
+    │
+    ├── web/                         # Flask or Streamlit frontend
+    │   ├── app.py                   # Simple local web interface
+    │   └── templates/               # HTML (if Flask)
+    │
+    ├── data/
+    │   └── expenses.csv             # Your core DB (for now)
+    │
+    ├── models/                      # ML models, LLM memory, vector store etc.
+    │   ├── categorization_model.pkl
+    │   └── memory.json
+    │
+    ├── static/                      # For UI assets (optional)
+    │
+    ├── .env                         # API keys (OpenAI etc.)
+    ├── .gitignore
     ├── README.md
-    └── requirements.txt
+    ├── requirements.txt
+    ├── main.py                      # CLI launcher for testing
+    └── config.py                    # Budget goals, constants
 ```
 
 ## 📈 Future Plans
