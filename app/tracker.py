@@ -19,10 +19,10 @@ def add_expense(amount: float, description: str, date=None, category='Uncategori
         date = datetime.now().strftime('%Y-%m-%d')
 
     # Load local BERT model
-    model = SentenceTransformer('D:/PROJECTS/Version Control/ExpenX/models/bert_model')
+    model = SentenceTransformer('D:/PROJECTS/Version Control/ExpenX/models/new_bert_model')
 
     # Load classifier
-    with open('D:/PROJECTS/Version Control/ExpenX/models/bert_classifier.pkl', 'rb') as f:
+    with open('D:/PROJECTS/Version Control/ExpenX/models/new_bert_classifier.pkl', 'rb') as f:
         clf = pickle.load(f)
 
     # Predict category

@@ -9,4 +9,9 @@ def main():
     add_expense(amount, description, date)
 
 if __name__ == "__main__":
-    main()
+    while True:
+        main()
+        cont = input("Do you want to add another expense? (yes = enter/no = press n): ").strip().lower()
+        if cont != '':
+            print("Thank you for using ExpenX!")
+            break
