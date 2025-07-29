@@ -12,6 +12,21 @@ def initialize_expense_file():
         df = pd.DataFrame(columns=['Date', 'Amount', 'Description', 'Category'])
         df.to_csv(EXPENSES_FILE, index=False)
 
+#--------------------------------------------------------------------------
+
+def get_expenses():
+    initialize_expense_file()
+    if not os.path.exists(EXPENSES_FILE):
+        return pd.DataFrame(columns=['Date', 'Amount', 'Description', 'Category'])
+    return pd.read_csv(EXPENSES_FILE)
+
+def delete_expense_by_index(index):
+    df = get_expenses()
+    df.drop(index, inplace=True)
+    df.to_csv(EXPENSES_FILE, index=False)
+
+#--------------------------------------------------------------------------    
+
 # Add a new expense
 def add_expense(amount: float, description: str, date=None, category='Uncategorized'):
     initialize_expense_file()
