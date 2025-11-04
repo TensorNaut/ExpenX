@@ -9,4 +9,5 @@ models/*.json
 Tesseract-OCR
 scripts
 app/OCR
-
+OCR/
+.vscode/
