@@ -7,3 +7,6 @@ data/*.csv
 models/*.pkl
 models/*.json
 Tesseract-OCR
+scripts
+app/OCR
+
