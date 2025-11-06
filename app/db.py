@@ -12,7 +12,6 @@ This file defines:
 - Ledger
 - Investment
 
-Keep this file single-source-of-truth for schema migrations/sync for new users.
 """
 import os
 from datetime import datetime
@@ -85,22 +84,35 @@ class Income(Base):
 
     account = relationship("Account", back_populates="incomes")
 
+class LedgerPerson(Base):
+    __tablename__ = 'ledger_persons'
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(128), unique=True, nullable=False)
+    contact = Column(String(128), nullable=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    entries = relationship("Ledger", back_populates="person", cascade="all, delete-orphan")
+
 class Ledger(Base):
     __tablename__ = 'ledger'
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=True)
     date = Column(Date, nullable=False, index=True)
     amount = Column(Float, nullable=False)
-    direction = Column(String(32), nullable=False)   # 'lent' | 'borrowed' | 'transfer' | other
-    party = Column(String(128))
+    direction = Column(String(16), nullable=False)  # 'lent' or 'borrowed' or 'transfer'
+    party = Column(String(128))    # legacy free-text party
+    person_id = Column(Integer, ForeignKey('ledger_persons.id'), nullable=True)  # new link
     due_date = Column(Date, nullable=True)
     purpose = Column(String(256), nullable=True)
     contact = Column(String(128), nullable=True)
     notes = Column(Text, nullable=True)
     affects_balance = Column(Boolean, default=False)
+    status = Column(String(32), default='active')  # active|settled
     created_at = Column(DateTime, default=func.now())
 
     account = relationship("Account", back_populates="ledgers")
+    person = relationship("LedgerPerson", back_populates="entries")
 
 class Investment(Base):
     __tablename__ = 'investments'

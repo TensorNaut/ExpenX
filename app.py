@@ -23,6 +23,19 @@ from app.investments import create_investment, list_investments, redeem_investme
 from datetime import date as dt_date
 import pandas as pd
 from app.finance import delete_account
+from app.finance import get_accounts
+
+from app.ledger import (
+    create_person,
+    list_persons,
+    add_entry_for_person,
+    get_entries_by_person,
+    mark_entry_settled,
+    get_person_summary,
+    overall_summary,
+    due_reminders,
+    person_leaderboard
+)
 
 # -----------------------------------------------------------
 # APP CONFIG
@@ -429,55 +442,222 @@ elif choice == "Transfer":
 # LEDGER
 # ===========================================================
 elif choice == "Ledger":
-    st.subheader("📒 Ledger (Lent / Borrowed)")
+    st.subheader("📒 Ledger — People & Entries")
 
-    # Create ledger entry
-    with st.expander("➕ Add ledger entry"):
-        accounts = get_accounts()
-        acct_names = [a["name"] for a in accounts]
-        acct_map = {a["name"]: a["id"] for a in accounts}
-
-        ledger_account = st.selectbox("Link to Account (optional)", ["<none>"] + acct_names)
-        amount = st.number_input("Amount (₹)", min_value=0.0, format="%.2f", key="ledger_amount")
-        direction = st.selectbox("Direction", ["lent", "borrowed"], index=0)
-        party = st.text_input("Person / Party", key="ledger_party")
-        due_date = st.date_input("Due date (optional)", value=None)
-        purpose = st.text_input("Purpose", key="ledger_purpose")
-        contact = st.text_input("Contact (optional)", key="ledger_contact")
-        notes = st.text_area("Notes (optional)", key="ledger_notes")
-        affects_bal = st.checkbox("Affects linked account balance?", value=False)
-
-        if st.button("Add Ledger Entry"):
-            try:
-                aid = acct_map.get(ledger_account) if ledger_account and ledger_account != "<none>" else None
-                lid = add_ledger_entry(
-                    account_id=aid,
-                    amount=amount,
-                    direction=direction,
-                    party=party,
-                    date_val=None,
-                    due_date=due_date if due_date else None,
-                    purpose=purpose,
-                    contact=contact,
-                    notes=notes,
-                    affects_balance=affects_bal
-                )
-                st.success(f"Ledger entry added (id {lid}).")
-                st.rerun()
-            except Exception as ex:
-                st.error(f"Failed to add ledger entry: {ex}")
-
-    # Display recent ledger entries
-    st.markdown("### Recent ledger entries")
-    ledger_rows = get_ledger(limit=200)
-    if not ledger_rows:
-        st.info("No ledger entries yet.")
+    # --- Top summary metrics ---
+    summary = overall_summary()
+    col1, col2, col3, col4 = st.columns(4)
+    net_val = summary['net']
+    net_label = f"₹{net_val:.2f}"
+    # color hint in caption
+    if net_val >= 0:
+        col1.metric("Net Position (You are owed)", net_label)
     else:
-        df_ledger = pd.DataFrame(ledger_rows)
-        # format date columns
-        if 'date' in df_ledger.columns:
-            df_ledger['date'] = pd.to_datetime(df_ledger['date'], errors='coerce').dt.date
-        st.dataframe(df_ledger, use_container_width=True)
+        col1.metric("Net Position (You owe)", net_label)
+    col2.metric("Total Lent", f"₹{summary['total_lent']:.2f}")
+    col3.metric("Total Borrowed", f"₹{summary['total_borrowed']:.2f}")
+    col4.metric("Open Dues", f"{summary['open_dues']}")
+
+    st.markdown("---")
+
+    # --- Due reminders (incoming / outgoing) ---
+    st.markdown("### 🔔 Due reminders")
+    reminders = due_reminders(days_ahead=14)  # next 14 days
+    inc = reminders.get('incoming', [])
+    out = reminders.get('outgoing', [])
+
+    with st.expander(f"Incoming (People owe you) — {len(inc)} due soon"):
+        if not inc:
+            st.info("No incoming dues within next 14 days.")
+        else:
+            for r in inc:
+                person_name = None
+                # try to resolve person name
+                if r.get('person_id'):
+                    ps = next((p for p in list_persons() if p['id']==r['person_id']), None)
+                    person_name = ps['name'] if ps else r.get('party') or "Unknown"
+                else:
+                    person_name = r.get('party') or "Unknown"
+                days = r.get('days_left')
+                cols = st.columns([3,2,2,2])
+                cols[0].write(f"**{person_name}** — ₹{r['amount']:.2f} — {r.get('purpose') or ''}")
+                cols[1].write(f"Due: {r.get('due_date')}")
+                cols[2].write(f"{days} days")
+                if cols[3].button(f"Mark settled (id {r['id']})", key=f"settle_in_{r['id']}"):
+                    mark_entry_settled(r['id'], settled=True)
+                    st.success("Marked settled.")
+                    st.rerun()
+
+    with st.expander(f"Outgoing (You owe others) — {len(out)} due soon"):
+        if not out:
+            st.info("No outgoing dues within next 14 days.")
+        else:
+            for r in out:
+                person_name = None
+                if r.get('person_id'):
+                    ps = next((p for p in list_persons() if p['id']==r['person_id']), None)
+                    person_name = ps['name'] if ps else r.get('party') or "Unknown"
+                else:
+                    person_name = r.get('party') or "Unknown"
+                days = r.get('days_left')
+                cols = st.columns([3,2,2,2])
+                cols[0].write(f"**{person_name}** — ₹{r['amount']:.2f} — {r.get('purpose') or ''}")
+                cols[1].write(f"Due: {r.get('due_date')}")
+                cols[2].write(f"{days} days")
+                if cols[3].button(f"Mark settled (id {r['id']})", key=f"settle_out_{r['id']}"):
+                    mark_entry_settled(r['id'], settled=True)
+                    st.success("Marked settled.")
+                    st.rerun()
+
+    st.markdown("---")
+
+    # --- Person directory & Add Person ---
+    st.markdown("### 👥 People")
+    persons = list_persons()
+    col_a, col_b = st.columns([3,2])
+    with col_a:
+        st.write("People in your ledger")
+        if not persons:
+            st.info("No people added yet. Use the form to add someone.")
+        else:
+            # show a compact list with net
+            for p in persons:
+                s = get_person_summary(p['id'])
+                net = s['net']
+                badge = " (owes you)" if net>0 else (" (you owe)" if net<0 else "")
+                st.write(f"**{p['name']}** — Net: ₹{net:.2f}{badge} — Open dues: {s['open_dues_count']} — Last: {s['last_activity'] or '—'}")
+
+    with col_b:
+        st.write("➕ Add new person")
+        new_name = st.text_input("Name", key="new_person_name")
+        new_contact = st.text_input("Contact (phone/email)", key="new_person_contact")
+        new_note = st.text_area("Notes (optional)", key="new_person_note", height=120)
+        if st.button("Create Person"):
+            if not new_name.strip():
+                st.warning("Name is required.")
+            else:
+                try:
+                    create_person(new_name.strip(), contact=new_contact.strip() or None, note=new_note.strip() or None)
+                    st.success("Person created.")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"Failed to create person: {ex}")
+
+    st.markdown("---")
+
+    # --- Add entry (person-wise) ---
+    st.markdown("### ➕ Add ledger entry")
+    with st.form("add_ledger_form", clear_on_submit=False):
+        persons = list_persons()
+        person_options = ["<Choose person>"] + [p['name'] for p in persons]
+        person_sel = st.selectbox("Person", person_options)
+        direction = st.selectbox("Direction", ["lent", "borrowed"])  # lent = you lent (they owe you)
+        amount = st.number_input("Amount (₹)", min_value=0.0, format="%.2f", key="ledger_amount_form")
+        date_val = st.date_input("Date", dt_date.today(), key="ledger_date_form")
+        due_date = st.date_input("Due date (optional)", value=None, key="ledger_due_form")
+        purpose = st.text_input("Purpose / Reason", key="ledger_purpose_form")
+        # link to account if affects_balance
+        acct_map = {a['name']: a['id'] for a in get_accounts()}
+        acct_names = list(acct_map.keys())
+        affects_balance = st.checkbox("Affects account balance?", value=False)
+        account_choice = None
+        if affects_balance:
+            if acct_names:
+                account_choice = st.selectbox("Select account to affect", ["<Choose account>"] + acct_names)
+        notes = st.text_area("Notes (optional)", key="ledger_notes_form")
+        submit = st.form_submit_button("Add Ledger Entry")
+        if submit:
+            # validate
+            person_id = None
+            party_text = None
+            if person_sel and person_sel != "<Choose person>":
+                # find id
+                p = next((p for p in persons if p['name'] == person_sel), None)
+                if p:
+                    person_id = p['id']
+            else:
+                party_text = st.text_input("Party name (free-text)", key="ledger_party_temp")
+                # note: above is rendered only now; advise user to re-submit if they entered free-text - simpler design: require person
+                # For now if neither selected and no free-text, ask user to create person first
+            if not person_id and not party_text:
+                st.error("Please select a person or create one first (free-text not supported inline).")
+            else:
+                try:
+                    acct_id = None
+                    if affects_balance and account_choice and account_choice != "<Choose account>":
+                        acct_id = acct_map.get(account_choice)
+                    eid = add_entry_for_person(
+                        person_id=person_id,
+                        amount=amount,
+                        direction=direction,
+                        date_val=date_val,
+                        due_date=due_date if due_date else None,
+                        purpose=purpose,
+                        contact=None,
+                        notes=notes,
+                        affects_balance=bool(affects_balance),
+                        account_id=acct_id
+                    )
+                    st.success(f"Entry created (id {eid}).")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"Failed to add entry: {ex}")
+
+    st.markdown("---")
+
+    # --- Person-wise entries & actions ---
+    st.markdown("### 📁 Person-wise view")
+    persons = list_persons()
+    if not persons:
+        st.info("No persons available. Add someone above to track ledger entries.")
+    else:
+        person_names = [p['name'] for p in persons]
+        sel_person_name = st.selectbox("Select person to view", person_names, index=0)
+        sel_person = next((p for p in persons if p['name'] == sel_person_name), None)
+        if sel_person:
+            pid = sel_person['id']
+            p_summary = get_person_summary(pid)
+            st.markdown(f"**{sel_person_name}** — Lent: ₹{p_summary['lent']:.2f} | Borrowed: ₹{p_summary['borrowed']:.2f} | Net: ₹{p_summary['net']:.2f} | Open dues: {p_summary['open_dues_count']}")
+            entries = get_entries_by_person(pid, include_settled=True, limit=1000)
+            if not entries:
+                st.info("No entries for this person.")
+            else:
+                # show table and action buttons
+                df_entries = pd.DataFrame(entries)
+                # format dates
+                if 'date' in df_entries.columns:
+                    df_entries['date'] = pd.to_datetime(df_entries['date']).dt.date
+                if 'due_date' in df_entries.columns:
+                    df_entries['due_date'] = pd.to_datetime(df_entries['due_date'], errors='coerce').dt.date
+                st.dataframe(df_entries, use_container_width=True)
+
+                # Provide per-entry settle toggle
+                st.markdown("**Actions**")
+                for e in entries:
+                    cols = st.columns([3,1,1,1])
+                    cols[0].write(f"#{e['id']} — {e['direction']} — ₹{e['amount']:.2f} — {e.get('purpose') or ''} — Due: {e.get('due_date') or '—'} — Status: {e['status']}")
+                    if e['status'] != 'settled':
+                        if cols[2].button(f"Mark settled {e['id']}", key=f"person_settle_{e['id']}"):
+                            mark_entry_settled(e['id'], settled=True)
+                            st.success("Marked settled")
+                            st.rerun()
+                    else:
+                        if cols[2].button(f"Mark active {e['id']}", key=f"person_unsettle_{e['id']}"):
+                            mark_entry_settled(e['id'], settled=False)
+                            st.success("Marked active")
+                            st.rerun()
+
+    st.markdown("---")
+
+    # --- Leaderboard: person net balances ---
+    st.markdown("### 🏆 Person leaderboard (by net)")
+    leaderboard = person_leaderboard(limit=100)
+    if not leaderboard:
+        st.info("No data yet.")
+    else:
+        df_lb = pd.DataFrame(leaderboard)
+        # format and colorize net (Streamlit dataframes can't color easily without st.table styler; keep simple)
+        st.dataframe(df_lb[['name','lent','borrowed','net','open_dues','last_activity']], use_container_width=True)
 
 
 # ===========================================================
