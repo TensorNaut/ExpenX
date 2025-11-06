@@ -108,6 +108,8 @@ class Ledger(Base):
     contact = Column(String(128), nullable=True)
     notes = Column(Text, nullable=True)
     affects_balance = Column(Boolean, default=False)
+    remaining_amount = Column(Float, nullable=True)      # outstanding amount (NULL => treat as amount)
+    interest_rate = Column(Float, default=0.0, nullable=True)
     status = Column(String(32), default='active')  # active|settled
     created_at = Column(DateTime, default=func.now())
 

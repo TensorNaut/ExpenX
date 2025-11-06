@@ -30,6 +30,7 @@ from app.ledger import (
     list_persons,
     add_entry_for_person,
     get_entries_by_person,
+    settle_entry,
     mark_entry_settled,
     get_person_summary,
     overall_summary,
@@ -440,7 +441,7 @@ elif choice == "Transfer":
 
 # ===========================================================
 # LEDGER
-# ===========================================================
+# ==========================================================
 elif choice == "Ledger":
     st.subheader("📒 Ledger — People & Entries")
 
@@ -448,44 +449,38 @@ elif choice == "Ledger":
     summary = overall_summary()
     col1, col2, col3, col4 = st.columns(4)
     net_val = summary['net']
-    net_label = f"₹{net_val:.2f}"
-    # color hint in caption
     if net_val >= 0:
-        col1.metric("Net Position (You are owed)", net_label)
+        col1.metric("Net Position (You are owed)", f"₹{net_val:.2f}")
     else:
-        col1.metric("Net Position (You owe)", net_label)
-    col2.metric("Total Lent", f"₹{summary['total_lent']:.2f}")
-    col3.metric("Total Borrowed", f"₹{summary['total_borrowed']:.2f}")
+        col1.metric("Net Position (You owe)", f"₹{net_val:.2f}")
+    col2.metric("Total Lent (open)", f"₹{summary['total_lent']:.2f}")
+    col3.metric("Total Borrowed (open)", f"₹{summary['total_borrowed']:.2f}")
     col4.metric("Open Dues", f"{summary['open_dues']}")
 
     st.markdown("---")
 
-    # --- Due reminders (incoming / outgoing) ---
-    st.markdown("### 🔔 Due reminders")
-    reminders = due_reminders(days_ahead=14)  # next 14 days
+    # --- Due reminders ---
+    st.markdown("### 🔔 Due reminders (next 14 days)")
+    reminders = due_reminders(days_ahead=14)
     inc = reminders.get('incoming', [])
     out = reminders.get('outgoing', [])
+
+    persons_cache = list_persons()
 
     with st.expander(f"Incoming (People owe you) — {len(inc)} due soon"):
         if not inc:
             st.info("No incoming dues within next 14 days.")
         else:
             for r in inc:
-                person_name = None
-                # try to resolve person name
-                if r.get('person_id'):
-                    ps = next((p for p in list_persons() if p['id']==r['person_id']), None)
-                    person_name = ps['name'] if ps else r.get('party') or "Unknown"
-                else:
-                    person_name = r.get('party') or "Unknown"
+                person_name = next((p['name'] for p in persons_cache if p['id']==r.get('person_id')), r.get('party') or "Unknown")
                 days = r.get('days_left')
                 cols = st.columns([3,2,2,2])
-                cols[0].write(f"**{person_name}** — ₹{r['amount']:.2f} — {r.get('purpose') or ''}")
+                cols[0].write(f"**{person_name}** — ₹{r['remaining_amount']:.2f} — {r.get('purpose') or ''}")
                 cols[1].write(f"Due: {r.get('due_date')}")
                 cols[2].write(f"{days} days")
-                if cols[3].button(f"Mark settled (id {r['id']})", key=f"settle_in_{r['id']}"):
-                    mark_entry_settled(r['id'], settled=True)
-                    st.success("Marked settled.")
+                if cols[3].button(f"Settle (id {r['id']})", key=f"settle_in_{r['id']}"):
+                    # create settle-focus flag for this id to show settle UI below
+                    st.session_state[f"settle_focus_{r['id']}"] = True
                     st.rerun()
 
     with st.expander(f"Outgoing (You owe others) — {len(out)} due soon"):
@@ -493,20 +488,14 @@ elif choice == "Ledger":
             st.info("No outgoing dues within next 14 days.")
         else:
             for r in out:
-                person_name = None
-                if r.get('person_id'):
-                    ps = next((p for p in list_persons() if p['id']==r['person_id']), None)
-                    person_name = ps['name'] if ps else r.get('party') or "Unknown"
-                else:
-                    person_name = r.get('party') or "Unknown"
+                person_name = next((p['name'] for p in persons_cache if p['id']==r.get('person_id')), r.get('party') or "Unknown")
                 days = r.get('days_left')
                 cols = st.columns([3,2,2,2])
-                cols[0].write(f"**{person_name}** — ₹{r['amount']:.2f} — {r.get('purpose') or ''}")
+                cols[0].write(f"**{person_name}** — ₹{r['remaining_amount']:.2f} — {r.get('purpose') or ''}")
                 cols[1].write(f"Due: {r.get('due_date')}")
                 cols[2].write(f"{days} days")
-                if cols[3].button(f"Mark settled (id {r['id']})", key=f"settle_out_{r['id']}"):
-                    mark_entry_settled(r['id'], settled=True)
-                    st.success("Marked settled.")
+                if cols[3].button(f"Settle (id {r['id']})", key=f"settle_out_{r['id']}"):
+                    st.session_state[f"settle_focus_{r['id']}"] = True
                     st.rerun()
 
     st.markdown("---")
@@ -520,12 +509,11 @@ elif choice == "Ledger":
         if not persons:
             st.info("No people added yet. Use the form to add someone.")
         else:
-            # show a compact list with net
             for p in persons:
                 s = get_person_summary(p['id'])
                 net = s['net']
                 badge = " (owes you)" if net>0 else (" (you owe)" if net<0 else "")
-                st.write(f"**{p['name']}** — Net: ₹{net:.2f}{badge} — Open dues: {s['open_dues_count']} — Last: {s['last_activity'] or '—'}")
+                st.write(f"**{p['name']}** — Net open: ₹{net:.2f}{badge} — Open dues: {s['open_dues_count']} — Last: {s['last_activity'] or '—'}")
 
     with col_b:
         st.write("➕ Add new person")
@@ -549,43 +537,47 @@ elif choice == "Ledger":
     st.markdown("### ➕ Add ledger entry")
     with st.form("add_ledger_form", clear_on_submit=False):
         persons = list_persons()
-        person_options = ["<Choose person>"] + [p['name'] for p in persons]
-        person_sel = st.selectbox("Person", person_options)
-        direction = st.selectbox("Direction", ["lent", "borrowed"])  # lent = you lent (they owe you)
+        person_options = ["<Choose person>"] + [p['name'] for p in persons] + ["<Type new person>"]
+        person_sel = st.selectbox("Person", person_options, key="add_person_select")
+        new_person_name = None
+        if person_sel == "<Type new person>":
+            # show inline name input reliably
+            new_person_name = st.text_input("Type new person name (will be created)", key="new_person_inline")
+        direction = st.selectbox("Direction", ["lent", "borrowed"], key="add_direction")
         amount = st.number_input("Amount (₹)", min_value=0.0, format="%.2f", key="ledger_amount_form")
         date_val = st.date_input("Date", dt_date.today(), key="ledger_date_form")
         due_date = st.date_input("Due date (optional)", value=None, key="ledger_due_form")
         purpose = st.text_input("Purpose / Reason", key="ledger_purpose_form")
-        # link to account if affects_balance
-        acct_map = {a['name']: a['id'] for a in get_accounts()}
-        acct_names = list(acct_map.keys())
-        affects_balance = st.checkbox("Affects account balance?", value=False)
-        account_choice = None
-        if affects_balance:
-            if acct_names:
-                account_choice = st.selectbox("Select account to affect", ["<Choose account>"] + acct_names)
+        interest_rate = st.number_input("Interest rate (%) (optional)", min_value=0.0, value=0.0, format="%.2f")
+        # Account dropdown replaces checkbox; default Main if present
+        acct_list = get_accounts()
+        acct_map = {a['name']: a['id'] for a in acct_list}
+        acct_options = ["<Does not affect>"] + list(acct_map.keys())
+        default_idx = 0
+        if "Main" in acct_map:
+            default_idx = acct_options.index("Main")
+        account_choice = st.selectbox("Affects which account? (choose '<Does not affect>' if none)", acct_options, index=default_idx)
         notes = st.text_area("Notes (optional)", key="ledger_notes_form")
         submit = st.form_submit_button("Add Ledger Entry")
         if submit:
-            # validate
+            # resolve person
             person_id = None
-            party_text = None
-            if person_sel and person_sel != "<Choose person>":
-                # find id
+            if person_sel and person_sel not in ("<Choose person>", "<Type new person>"):
                 p = next((p for p in persons if p['name'] == person_sel), None)
                 if p:
                     person_id = p['id']
-            else:
-                party_text = st.text_input("Party name (free-text)", key="ledger_party_temp")
-                # note: above is rendered only now; advise user to re-submit if they entered free-text - simpler design: require person
-                # For now if neither selected and no free-text, ask user to create person first
-            if not person_id and not party_text:
-                st.error("Please select a person or create one first (free-text not supported inline).")
-            else:
+            elif person_sel == "<Type new person>" and new_person_name and new_person_name.strip():
                 try:
-                    acct_id = None
-                    if affects_balance and account_choice and account_choice != "<Choose account>":
-                        acct_id = acct_map.get(account_choice)
+                    person_id = create_person(new_person_name.strip())
+                except Exception as ex:
+                    st.error(f"Failed to create person: {ex}")
+            else:
+                st.error("Please select or type a person name.")
+                person_id = None
+
+            if person_id:
+                try:
+                    acct_id = acct_map.get(account_choice) if account_choice and account_choice != "<Does not affect>" else None
                     eid = add_entry_for_person(
                         person_id=person_id,
                         amount=amount,
@@ -595,8 +587,9 @@ elif choice == "Ledger":
                         purpose=purpose,
                         contact=None,
                         notes=notes,
-                        affects_balance=bool(affects_balance),
-                        account_id=acct_id
+                        affects_balance=True if acct_id else False,
+                        account_id=acct_id,
+                        interest_rate=interest_rate
                     )
                     st.success(f"Entry created (id {eid}).")
                     st.rerun()
@@ -605,7 +598,7 @@ elif choice == "Ledger":
 
     st.markdown("---")
 
-    # --- Person-wise entries & actions ---
+    # --- Person-wise entries & settlement ---
     st.markdown("### 📁 Person-wise view")
     persons = list_persons()
     if not persons:
@@ -617,47 +610,47 @@ elif choice == "Ledger":
         if sel_person:
             pid = sel_person['id']
             p_summary = get_person_summary(pid)
-            st.markdown(f"**{sel_person_name}** — Lent: ₹{p_summary['lent']:.2f} | Borrowed: ₹{p_summary['borrowed']:.2f} | Net: ₹{p_summary['net']:.2f} | Open dues: {p_summary['open_dues_count']}")
+            st.markdown(f"**{sel_person_name}** — Lent total: ₹{p_summary['lent']:.2f} | Borrowed total: ₹{p_summary['borrowed']:.2f} | Open Lent: ₹{p_summary['lent_open']:.2f} | Open Borrowed: ₹{p_summary['borrowed_open']:.2f} | Net open: ₹{p_summary['net']:.2f} | Open dues: {p_summary['open_dues_count']}")
             entries = get_entries_by_person(pid, include_settled=True, limit=1000)
             if not entries:
                 st.info("No entries for this person.")
             else:
-                # show table and action buttons
-                df_entries = pd.DataFrame(entries)
-                # format dates
-                if 'date' in df_entries.columns:
-                    df_entries['date'] = pd.to_datetime(df_entries['date']).dt.date
-                if 'due_date' in df_entries.columns:
-                    df_entries['due_date'] = pd.to_datetime(df_entries['due_date'], errors='coerce').dt.date
-                st.dataframe(df_entries, use_container_width=True)
-
-                # Provide per-entry settle toggle
-                st.markdown("**Actions**")
+                # show entries and settle UI
+                acct_map = {a['name']: a['id'] for a in get_accounts()}
+                acct_options = ["<Does not affect>"] + list(acct_map.keys())
                 for e in entries:
-                    cols = st.columns([3,1,1,1])
-                    cols[0].write(f"#{e['id']} — {e['direction']} — ₹{e['amount']:.2f} — {e.get('purpose') or ''} — Due: {e.get('due_date') or '—'} — Status: {e['status']}")
-                    if e['status'] != 'settled':
-                        if cols[2].button(f"Mark settled {e['id']}", key=f"person_settle_{e['id']}"):
-                            mark_entry_settled(e['id'], settled=True)
-                            st.success("Marked settled")
-                            st.rerun()
-                    else:
-                        if cols[2].button(f"Mark active {e['id']}", key=f"person_unsettle_{e['id']}"):
-                            mark_entry_settled(e['id'], settled=False)
-                            st.success("Marked active")
-                            st.rerun()
+                    remaining = float(e.get('remaining_amount') if e.get('remaining_amount') is not None else e.get('amount'))
+                    cols = st.columns([4,1,1,2])
+                    cols[0].write(f"#{e['id']} — {e['direction']} — ₹{e['amount']:.2f} — Remaining: ₹{remaining:.2f} — {e.get('purpose') or ''} — Due: {e.get('due_date') or '—'} — Status: {e['status']}")
+                    # settle expander
+                    with cols[3].expander("Settle"):
+                        st.write("Settle this entry (partial/full)")
+                        settle_max = remaining
+                        settle_amt = st.number_input(f"Amount to settle (max {settle_max:.2f})", min_value=0.0, max_value=settle_max, format="%.2f", key=f"settle_amt_{e['id']}")
+                        acct_choice = st.selectbox("Affect which account?", acct_options, index=0, key=f"settle_acc_{e['id']}")
+                        acct_choice_id = acct_map.get(acct_choice) if acct_choice and acct_choice != "<Does not affect>" else None
+                        settle_note = st.text_input("Note (optional)", key=f"settle_note_{e['id']}")
+                        if st.button(f"Apply settle {e['id']}", key=f"apply_settle_{e['id']}"):
+                            try:
+                                if settle_amt <= 0:
+                                    st.error("Enter an amount > 0")
+                                else:
+                                    settle_entry(e['id'], settle_amt, account_id=acct_choice_id, note=settle_note)
+                                    st.success("Settlement applied.")
+                                    st.rerun()
+                            except Exception as ex:
+                                st.error(f"Failed to settle: {ex}")
 
     st.markdown("---")
 
     # --- Leaderboard: person net balances ---
-    st.markdown("### 🏆 Person leaderboard (by net)")
+    st.markdown("### 🏆 Overall Summary (by net open)")
     leaderboard = person_leaderboard(limit=100)
     if not leaderboard:
         st.info("No data yet.")
     else:
         df_lb = pd.DataFrame(leaderboard)
-        # format and colorize net (Streamlit dataframes can't color easily without st.table styler; keep simple)
-        st.dataframe(df_lb[['name','lent','borrowed','net','open_dues','last_activity']], use_container_width=True)
+        st.dataframe(df_lb[['name','lent_open','borrowed_open','net','open_dues','last_activity']], use_container_width=True)
 
 
 # ===========================================================
