@@ -11,3 +11,4 @@ scripts
 app/OCR
 OCR/
 .vscode/
+data/db_backups/

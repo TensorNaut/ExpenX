@@ -533,16 +533,13 @@ elif choice == "Ledger":
 
     st.markdown("---")
 
+
     # --- Add entry (person-wise) ---
     st.markdown("### ➕ Add ledger entry")
     with st.form("add_ledger_form", clear_on_submit=False):
         persons = list_persons()
-        person_options = ["<Choose person>"] + [p['name'] for p in persons] + ["<Type new person>"]
+        person_options = ["<Choose person>"] + [p['name'] for p in persons]
         person_sel = st.selectbox("Person", person_options, key="add_person_select")
-        new_person_name = None
-        if person_sel == "<Type new person>":
-            # show inline name input reliably
-            new_person_name = st.text_input("Type new person name (will be created)", key="new_person_inline")
         direction = st.selectbox("Direction", ["lent", "borrowed"], key="add_direction")
         amount = st.number_input("Amount (₹)", min_value=0.0, format="%.2f", key="ledger_amount_form")
         date_val = st.date_input("Date", dt_date.today(), key="ledger_date_form")
@@ -566,11 +563,6 @@ elif choice == "Ledger":
                 p = next((p for p in persons if p['name'] == person_sel), None)
                 if p:
                     person_id = p['id']
-            elif person_sel == "<Type new person>" and new_person_name and new_person_name.strip():
-                try:
-                    person_id = create_person(new_person_name.strip())
-                except Exception as ex:
-                    st.error(f"Failed to create person: {ex}")
             else:
                 st.error("Please select or type a person name.")
                 person_id = None
