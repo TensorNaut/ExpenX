@@ -4,14 +4,26 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from app.db import get_session, Account, Income, Ledger, Expense, init_db
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 
-# Ensure DB created
 init_db()
 
-def create_account(name: str, initial_balance: float = 0.0, currency: str = 'INR') -> int:
+def create_account(name: str, initial_balance: float = 0.0, currency: str = 'INR', kind: str = 'bank') -> int:
+    """
+    Create account. name must be unique (case-insensitive).
+    kind: 'bank'|'cash'|'card'
+    """
+    name = str(name).strip()
+    if not name:
+        raise ValueError("Account name cannot be empty")
+    kind = kind if kind in ('bank','cash','card') else 'bank'
     sess: Session = get_session()
     try:
-        acct = Account(name=name, balance=float(initial_balance), currency=currency)
+        # check duplicate (case-insensitive)
+        exists = sess.query(Account).filter(func.lower(Account.name) == name.lower()).first()
+        if exists:
+            raise ValueError(f"Account with name '{name}' already exists")
+        acct = Account(name=name, balance=float(initial_balance), currency=currency, kind=kind)
         sess.add(acct)
         sess.commit()
         return acct.id
@@ -24,8 +36,18 @@ def create_account(name: str, initial_balance: float = 0.0, currency: str = 'INR
 def get_accounts() -> List[Dict[str,Any]]:
     sess = get_session()
     try:
-        rows = sess.query(Account).order_by(Account.name).all()
-        return [{'id': r.id, 'name': r.name, 'balance': float(r.balance), 'currency': r.currency} for r in rows]
+        rows = sess.query(Account).order_by(Account.id).all()
+        out = []
+        for r in rows:
+            kind = getattr(r, 'kind', 'bank')  # fallback if column missing
+            out.append({
+                'id': r.id,
+                'name': r.name,
+                'balance': float(r.balance),
+                'currency': r.currency,
+                'kind': kind
+            })
+        return out
     finally:
         sess.close()
 
@@ -35,13 +57,39 @@ def get_account_by_id(account_id: int) -> Optional[Dict[str,Any]]:
         a = sess.query(Account).filter(Account.id == account_id).first()
         if not a:
             return None
-        return {'id': a.id, 'name': a.name, 'balance': float(a.balance), 'currency': a.currency}
+        return {
+            'id': a.id,
+            'name': a.name,
+            'balance': float(a.balance),
+            'currency': a.currency,
+            'kind': getattr(a, 'kind', 'bank')
+        }
     finally:
         sess.close()
 
+def get_account_by_name(name: str) -> Optional[Dict[str,Any]]:
+    sess = get_session()
+    try:
+        a = sess.query(Account).filter(func.lower(Account.name) == name.lower()).first()
+        if not a:
+            return None
+        return {
+            'id': a.id,
+            'name': a.name,
+            'balance': float(a.balance),
+            'currency': a.currency,
+            'kind': getattr(a, 'kind', 'bank')
+        }
+    finally:
+        sess.close()
+
+
 def adjust_balance(account_id: int, delta: float) -> bool:
     """
-    Atomically adjust account balance by delta (positive or negative).
+    Adjust balance by delta. For bank/cash: positive increases assets.
+    For card: we use balance field to store outstanding amount (positive = owed).
+      - For card account: to add an expense, call adjust_balance(card_id, +amount)
+      - To pay down card: adjust_balance(card_id, -amount)
     """
     sess = get_session()
     try:
@@ -58,22 +106,73 @@ def adjust_balance(account_id: int, delta: float) -> bool:
         sess.close()
 
 def add_income(account_id: int, amount: float, source: str, date_val: date = None, description: str = '') -> int:
-    """
-    Insert an income record and add amount to account balance atomically.
-    """
     if date_val is None:
         date_val = datetime.now().date()
     sess = get_session()
     try:
-        # validate account
         acct = sess.query(Account).filter(Account.id == account_id).first()
         if not acct:
             raise ValueError("Account not found")
         inc = Income(account_id=account_id, amount=float(amount), source=source, date=date_val, description=description)
         sess.add(inc)
-        acct.balance = float(acct.balance or 0.0) + float(amount)
+        # For income, always increase account balance for bank/cash.
+        # If account is card and you record income into card, it will reduce outstanding (uncommon).
+        if acct.kind in ('bank','cash'):
+            acct.balance = float(acct.balance or 0.0) + float(amount)
+        else:
+            # treating income to card as a payment: reduce outstanding
+            acct.balance = float(acct.balance or 0.0) - float(amount)
         sess.commit()
         return inc.id
+    except Exception:
+        sess.rollback()
+        raise
+    finally:
+        sess.close()
+
+def transfer_between_accounts(from_account_id: int, to_account_id: int, amount: float, description: str = '') -> bool:
+    """
+    Atomic transfer:
+      - from_account: balance decreases if bank/cash; if from_account is card, paying from card is unusual but will increase card outstanding (allowed but logical check recommended)
+      - to_account: balance increases if bank/cash; if to_account is card, paying card (i.e., transferring money to card) reduces outstanding (we treat as reduction)
+    The function tries to interpret semantics sensibly:
+      - subtract from 'from' according to its kind, add to 'to' according to its kind.
+    """
+    if from_account_id == to_account_id:
+        raise ValueError("From and To account must be different")
+    if amount <= 0:
+        raise ValueError("Amount must be positive")
+
+    sess = get_session()
+    try:
+        a_from = sess.query(Account).filter(Account.id == from_account_id).with_for_update().first()
+        a_to = sess.query(Account).filter(Account.id == to_account_id).with_for_update().first()
+        if not a_from or not a_to:
+            raise ValueError("Account(s) not found")
+
+        # Determine deltas:
+        # From account delta: bank/cash -> -amount, card -> +amount (borrowing on card)
+        if a_from.kind in ('bank','cash'):
+            delta_from = -float(amount)
+        else:  # card
+            delta_from = float(amount)  # using card to send money increases outstanding (rare)
+
+        # To account delta: bank/cash -> +amount, card -> -amount (paying card reduces outstanding)
+        if a_to.kind in ('bank','cash'):
+            delta_to = float(amount)
+        else:  # card
+            delta_to = -float(amount)
+
+        a_from.balance = float(a_from.balance or 0.0) + delta_from
+        a_to.balance = float(a_to.balance or 0.0) + delta_to
+
+        # write a Ledger entry for transparent record (optional)
+        entry = Ledger(account_id=from_account_id, amount=float(amount), direction='transfer', party=a_to.name,
+                       date=datetime.now().date(), purpose=description or f"Transfer to {a_to.name}",
+                       affects_balance=True)
+        sess.add(entry)
+        sess.commit()
+        return True
     except Exception:
         sess.rollback()
         raise
@@ -158,5 +257,33 @@ def get_account_transactions(account_id: int, limit:int=200) -> List[Dict[str,An
         events.sort(key=lambda x: x['date'], reverse=True)
         # limit
         return events[:limit]
+    finally:
+        sess.close()
+
+def delete_account(account_id: int) -> bool:
+    """
+    Delete account if it has no associated transactions.
+    """
+    sess = get_session()
+    try:
+        acct = sess.query(Account).filter(Account.id == account_id).first()
+        if not acct:
+            return False
+        # Check for associated transactions
+        has_income = sess.query(Income).filter(Income.account_id == account_id).first() is not None
+        has_expense = sess.query(Expense).filter(Expense.account_id == account_id).first() is not None
+        has_ledger = sess.query(Ledger).filter(Ledger.account_id == account_id).first() is not None
+        if has_income or has_expense or has_ledger:
+            print("Warning: This account has associated transactions and may not be fully deleted.")
+            # Optionally, you can still delete the account but keep the transactions
+            sess.delete(acct)
+            sess.commit()
+            return False
+        sess.delete(acct)
+        sess.commit()
+        return True
+    except Exception:
+        sess.rollback()
+        raise
     finally:
         sess.close()

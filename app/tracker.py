@@ -134,7 +134,16 @@ def add_expense(amount: float,
 
     # debit linked account (if any). Use finance.adjust_balance helper.
     if resolved_account_id:
-        adjust_balance(resolved_account_id, -float(amount))
+        # fetch account kind
+        from app.finance import get_account_by_id
+        acct = get_account_by_id(resolved_account_id)
+        if acct:
+            if acct['kind'] in ('bank','cash'):
+                # debit
+                adjust_balance(resolved_account_id, -float(amount))
+            else:  # card
+                # increase card outstanding (liability) instead of debit
+                adjust_balance(resolved_account_id, float(amount))
     return eid
 
 def get_expenses(limit: int = 1000, offset: int = 0) -> pd.DataFrame:
