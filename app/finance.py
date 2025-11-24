@@ -287,3 +287,61 @@ def delete_account(account_id: int) -> bool:
         raise
     finally:
         sess.close()
+
+
+def settle_credit_card(card_account_id: int, from_account_id: int, amount: float, note: Optional[str] = None) -> bool:
+    """
+    Pay off (partially or fully) a credit card balance using another account.
+    - card_account_id: the account with kind='card'
+    - from_account_id: the paying account (bank/cash)
+    - amount: payment amount
+    - note: optional description
+    Adjusts balances accordingly:
+      - card balance decreases (reduces outstanding)
+      - payer account balance decreases (spending cash)
+    """
+    if amount <= 0:
+        raise ValueError("Amount must be positive")
+    if card_account_id == from_account_id:
+        raise ValueError("Cannot settle using same account")
+
+    sess = get_session()
+    try:
+        card = sess.query(Account).filter(Account.id == card_account_id).with_for_update().first()
+        payer = sess.query(Account).filter(Account.id == from_account_id).with_for_update().first()
+
+        if not card or not payer:
+            raise ValueError("Invalid accounts")
+        if card.kind != 'card':
+            raise ValueError("Target account is not a credit card")
+        if payer.kind not in ('bank', 'cash'):
+            raise ValueError("Payer account must be bank or cash")
+
+        outstanding = float(card.balance or 0.0)
+        if amount > outstanding + 1e-9:
+            raise ValueError(f"Cannot pay more than outstanding (₹{outstanding:.2f})")
+
+        # Adjust balances
+        payer.balance -= float(amount)
+        card.balance -= float(amount)  # reduces outstanding
+
+        # Record a ledger-style entry for transparency
+        entry = Ledger(
+            account_id=from_account_id,
+            amount=float(amount),
+            direction='transfer',
+            party=card.name,
+            date=datetime.now().date(),
+            purpose=note or f"Credit Card Payment ({card.name})",
+            affects_balance=True,
+        )
+        sess.add(entry)
+
+        sess.commit()
+        return True
+    except Exception:
+        sess.rollback()
+        raise
+    finally:
+        sess.close()
+

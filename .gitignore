@@ -3,9 +3,11 @@ __pycache__/
 *.pyc
 .env
 *.db
+*.db.bak
 data/*.csv
 models/*.pkl
 models/*.json
+data/*.json
 Tesseract-OCR
 scripts
 app/OCR

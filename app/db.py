@@ -116,23 +116,53 @@ class Ledger(Base):
     account = relationship("Account", back_populates="ledgers")
     person = relationship("LedgerPerson", back_populates="entries")
 
+# Investment model
 class Investment(Base):
     __tablename__ = 'investments'
     id = Column(Integer, primary_key=True, index=True)
     account_id = Column(Integer, ForeignKey('accounts.id'), nullable=True)
     date = Column(Date, nullable=False, index=True)
-    amount = Column(Float, nullable=False)  # principal
-    description = Column(Text, nullable=True)
-    type = Column(String(64), nullable=True)  # FD / MF / Stock / Bond / Crypto / Gold / SIP / etc.
-    risk = Column(String(32), nullable=True)  # Low / Medium / High
+    amount = Column(Float, nullable=False)                        # invested principal
+    principal_remaining = Column(Float, nullable=True)            # outstanding principal (may be NULL for old rows)
+    type = Column(String(64), nullable=True)
+    risk = Column(String(32), nullable=True)
     mature_period_months = Column(Integer, nullable=True)
     maturity_date = Column(Date, nullable=True)
     expected_return_percent = Column(Float, nullable=True)
-    status = Column(String(32), default='active')  # active|matured|redeemed|sold
+    status = Column(String(32), default='active')                 # active | partially_redeemed | redeemed
     notes = Column(Text, nullable=True)
+    currency = Column(String(8), default='INR')
+    quantity = Column(Float, nullable=True)                       # units / shares / grams
+    unit_label = Column(String(64), nullable=True)                # 'shares', 'units', 'grams', 'kg'
+    purchase_price_per_unit = Column(Float, nullable=True)        # price when bought
+    current_price_per_unit = Column(Float, nullable=True)         # market price or manual
+    current_value = Column(Float, nullable=True)                  # quantity * current_price or manual value
+    last_updated = Column(DateTime, default=func.now(), onupdate=func.now())
     created_at = Column(DateTime, default=func.now())
 
     account = relationship("Account", back_populates="investments")
+
+class InvestmentSettlement(Base):
+    __tablename__ = 'investment_settlements'
+    id = Column(Integer, primary_key=True, index=True)
+    investment_id = Column(Integer, ForeignKey('investments.id'), nullable=False)
+    date = Column(Date, nullable=False)
+    amount = Column(Float, nullable=False)
+    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=True)  # <- ensure present
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
+    investment = relationship("Investment", backref="settlements")
+
+# InvestmentSnapshot (timeseries)
+class InvestmentSnapshot(Base):
+    __tablename__ = 'investment_snapshots'
+    id = Column(Integer, primary_key=True, index=True)
+    snapshot_date = Column(Date, nullable=False, index=True)
+    total_value = Column(Float, nullable=False)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=func.now())
+
 
 # -------------------------
 # Indexes

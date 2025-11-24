@@ -1,5 +1,9 @@
 # app.py (with Ledger and Investments integrated)
 import streamlit as st
+
+from datetime import date as dt_date
+import pandas as pd
+
 from app.tracker import (
     add_expense,
     get_expenses,
@@ -19,9 +23,6 @@ from app.finance import (
     add_ledger_entry,
     get_ledger,
 )
-from app.investments import create_investment, list_investments, redeem_investment
-from datetime import date as dt_date
-import pandas as pd
 from app.finance import delete_account
 from app.finance import get_accounts
 
@@ -37,6 +38,39 @@ from app.ledger import (
     due_reminders,
     person_leaderboard
 )
+
+from app.investments import (
+    create_investment,
+    list_investments,
+    get_investment_by_id,
+    redeem_investment,
+    get_settlements_for_investment,
+    portfolio_summary,
+    _unit_label_for_type
+)
+
+from app.visualizer import show_dashboard
+
+# -----------------------------------------------------------
+# DATABASE INITIALIZATION & SCHEMA VALIDATION
+# -----------------------------------------------------------
+
+from app.schema_validator import validate_and_repair_schema
+
+def init_db(auto_repair: bool = False):
+    # existing init code: create tables if missing
+    Base.metadata.create_all(bind=engine, checkfirst=True)
+
+    # new: validate schema & optionally auto-repair mismatches
+    try:
+        # pass engine and metadata to validator
+        report = validate_and_repair_schema(engine, Base.metadata, auto_repair=auto_repair)
+        # optionally log the report, or keep simple print
+        # logger.info(report)
+    except Exception as e:
+        # don't crash the entire app (but log it)
+        import logging
+        logging.getLogger("schema_validator").exception("Schema validation failed: %s", e)
 
 # -----------------------------------------------------------
 # APP CONFIG
@@ -92,6 +126,7 @@ accounts_now = get_accounts()
 # MENU
 # -----------------------------------------------------------
 menu = [
+    "📊 Analytics / Dashboard",
     "Add Expense",
     "View Expenses",
     "Edit Expense",
@@ -117,6 +152,14 @@ def build_dropdown_options(base_options, predicted):
     if "Other" not in dropdown_options:
         dropdown_options.append("Other")
     return dropdown_options
+
+# ===========================================================
+# ANALYTICS / DASHBOARD
+# ===========================================================
+
+if choice == "📊 Analytics / Dashboard":
+    show_dashboard()
+    st.stop()
 
 
 # ===========================================================
@@ -301,6 +344,33 @@ elif choice == "Edit Expense":
                     except Exception as ex:
                         st.error(f"Failed to update: {ex}")
 
+# ===========================================================
+# DELETE EXPENSE
+# ===========================================================
+elif choice == "Delete Expense":
+    st.subheader("🗑️ Delete Expense")
+    df = get_expenses()
+    if df.empty:
+        st.info("No expenses to delete.")
+    else:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
+        df["display"] = df.apply(
+            lambda x: f"{int(x['id'])} - ₹{x['Amount']} | {x['Description']} on {x['Date']} [{x['Category']}]",
+            axis=1,
+        )
+        selection = st.selectbox("Select expense:", df["display"].tolist())
+        if selection:
+            eid = int(selection.split(" - ")[0])
+            if st.button("Delete Selected"):
+                try:
+                    ok = delete_expense_by_id(eid)
+                    if ok:
+                        st.success("✅ Expense deleted.")
+                        st.rerun()
+                    else:
+                        st.warning("⚠️ Expense not found.")
+                except Exception as ex:
+                    st.error(f"Failed: {ex}")
 
 # ===========================================================
 # INCOME
@@ -375,6 +445,30 @@ elif choice == "Accounts":
         else:
             st.warning("Account not found.")
 
+    with st.expander("💳 Settle Credit Card"):
+        cards = [a for a in accounts if a["kind"] == "card"]
+        banks = [a for a in accounts if a["kind"] in ("bank", "cash")]
+
+        if not cards:
+            st.info("No credit card accounts found.")
+        elif not banks:
+            st.info("No bank/cash account to pay from.")
+        else:
+            card_sel = st.selectbox("Select Credit Card", [c["name"] for c in cards])
+            from_sel = st.selectbox("Pay From", [b["name"] for b in banks])
+            amt = st.number_input("Amount (₹)", min_value=0.0, format="%.2f")
+            note = st.text_input("Note (optional)")
+            if st.button("Settle Now"):
+                try:
+                    from app.finance import get_account_by_name, settle_credit_card
+                    card_id = get_account_by_name(card_sel)["id"]
+                    payer_id = get_account_by_name(from_sel)["id"]
+                    settle_credit_card(card_id, payer_id, amt, note)
+                    st.success(f"✅ Payment of ₹{amt:.2f} made from {from_sel} to {card_sel}")
+                    st.rerun()
+                except Exception as ex:
+                    st.error(f"Failed: {ex}")
+    
     with st.expander("Delete Account"):
         accounts = get_accounts()
         acct_map = {a["name"]: a["id"] for a in accounts}
@@ -651,123 +745,139 @@ elif choice == "Ledger":
 elif choice == "Investments":
     st.subheader("📈 Investments")
 
-    # Create investment form
-    with st.expander("➕ Add new investment"):
+    # Summary metrics
+    ps = portfolio_summary()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Invested", f"₹{ps['total_principal']:.2f}")
+    c2.metric("Principal Remaining", f"₹{ps['total_remaining']:.2f}")
+    c3.metric("Current Value (est.)", f"₹{ps['current_value']:.2f}")
+
+    st.markdown("---")
+
+    # Add investment form
+    st.markdown("### ➕ Add Investment")
+    with st.form("add_inv_form", clear_on_submit=False):
+        amount = st.number_input("Amount (₹)", min_value=0.0, format="%.2f", key="inv_amount")
+        inv_date = st.date_input("Date", dt_date.today(), key="inv_date")
+        inv_type = st.selectbox("Type", ["FD","Mutual Fund","Stock","Bond","Gold","Silver","Crypto","SIP","Other"], key="inv_type")
+        unit_label, has_unit = _unit_label_for_type(inv_type)
+        qty = None
+        purchase_price = None
+        if has_unit:
+            qty = st.number_input(f"Quantity ({unit_label})", min_value=0.0, key="inv_qty")
+            purchase_price = st.number_input(f"Purchase price per {unit_label} (optional)", min_value=0.0, format="%.2f", key="inv_ppu")
+        risk = st.selectbox("Risk", ["Low","Medium","High","Unknown"], index=3, key="inv_risk")
+        maturity_date = st.date_input("Maturity date (optional)", value=None, key="inv_mature")
+        expected_return = st.number_input("Expected annual return (%)", min_value=0.0, format="%.2f", key="inv_return")
         accounts = get_accounts()
         acct_map = {a['name']: a['id'] for a in accounts}
-        acct_names = list(acct_map.keys())
-
-        invest_amount = st.number_input("Amount (₹)", min_value=0.0, format="%.2f", key="inv_amount")
-        inv_date = st.date_input("Date", dt_date.today(), key="inv_date")
-        inv_type = st.selectbox("Type", ["FD", "Mutual Fund", "Stock", "Bond", "Crypto", "Gold", "SIP", "Other"], key="inv_type")
-        if inv_type == "Other":
-            inv_type = st.text_input("Specify type", key="inv_type_other")
-        risk = st.selectbox("Risk", ["Low", "Medium", "High", "Unknown"], index=3, key="inv_risk")
-        mature_months = st.number_input("Mature period (months, optional)", min_value=0, value=0, key="inv_months")
-        expected_return = st.number_input("Expected annual return (%) (optional)", min_value=0.0, format="%.2f", key="inv_return")
-        description = st.text_input("Description (optional)", key="inv_desc")
+        acct_options = ["<Does not debit>"] + list(acct_map.keys())
+        default_idx = 0
+        if "Main" in acct_map:
+            default_idx = acct_options.index("Main")
+        fund_account = st.selectbox("Debit which account (optional)", acct_options, index=default_idx)
+        debit_flag = fund_account != "<Does not debit>"
         notes = st.text_area("Notes (optional)", key="inv_notes")
-
-        # Funding source: choose account or other
-        funding_opts = ["Other source (cash / external)"] + acct_names
-        funding_sel = st.selectbox("Funding source", funding_opts, key="inv_funding")
-        debit_account = False
-        account_id = None
-        if funding_sel != "Other source (cash / external)":
-            account_id = acct_map[funding_sel]
-            debit_account = st.checkbox("Debit selected account for investment amount?", value=True, key="inv_debit")
-        else:
-            debit_account = False
-
-        if st.button("Create Investment"):
+        submit = st.form_submit_button("Create Investment")
+        if submit:
+            acct_id = acct_map.get(fund_account) if debit_flag else None
             try:
-                maturity_date = None
-                if mature_months and mature_months > 0:
-                    # approximate maturity date by adding months
-                    maturity_date = (pd.Timestamp(inv_date) + pd.DateOffset(months=int(mature_months))).date()
-                aid = account_id if account_id else None
                 inv_id = create_investment(
-                    amount=invest_amount,
+                    amount=amount,
                     inv_type=inv_type,
                     date_val=inv_date,
-                    account_id=aid,
-                    description=description,
+                    account_id=acct_id,
                     risk=risk,
-                    mature_period_months=int(mature_months) if mature_months > 0 else None,
-                    expected_return_percent=expected_return if expected_return > 0 else None,
-                    debit_account=debit_account,
-                    maturity_date=maturity_date,
-                    notes=notes
+                    expected_return_percent=expected_return,
+                    debit_account=debit_flag,
+                    maturity_date=maturity_date if maturity_date else None,
+                    notes=notes,
+                    quantity=qty if qty and qty>0 else None,
+                    purchase_price_per_unit=purchase_price if purchase_price and purchase_price>0 else None
                 )
                 st.success(f"Investment created (id {inv_id}).")
-                st.rerun()
+                st.experimental_rerun()
             except Exception as ex:
                 st.error(f"Failed to create investment: {ex}")
 
-    # List current investments
-    st.markdown("### Active investments")
-    investments = list_investments(status='active')
-    if not investments:
-        st.info("No active investments.")
+    st.markdown("---")
+
+    # Active investments (available for redemption)
+    st.markdown("### Active investments (available for redemption)")
+    active = list_investments(status=None, include_zero_remaining=False)
+    if not active:
+        st.info("No active investments available for redemption.")
     else:
-        df_inv = pd.DataFrame(investments)
-        st.dataframe(df_inv, use_container_width=True)
+        for inv in active:
+            title = f"#{inv['id']} | {inv['type']} — ₹{inv['amount']:.2f} (rem ₹{inv['principal_remaining']:.2f})"
+            st.write(title)
+            meta = []
+            if inv.get('quantity') is not None:
+                meta.append(f"{inv['quantity']} {inv.get('unit_label') or ''}")
+                if inv.get('purchase_price_per_unit'):
+                    meta.append(f"p.p.u ₹{inv['purchase_price_per_unit']}")
+            if inv.get('risk'):
+                meta.append(inv['risk'])
+            if inv.get('maturity_date'):
+                meta.append(f"matures {inv['maturity_date']}")
+            st.write(" • ".join(meta))
 
-    # Redeem / mark matured
-    st.markdown("### Redeem / mark as matured")
-    inv_rows = list_investments(status='active')
-    if inv_rows:
-        inv_map = {f"{r['id']} - {r['type']} | ₹{r['amount']} on {r['date']}": r['id'] for r in inv_rows}
-        sel = st.selectbox("Select investment to redeem", list(inv_map.keys()))
-        redeem_amt = st.number_input("Redeem amount (leave 0 to redeem full)", min_value=0.0, format="%.2f", key="redeem_amt")
-        # choose credit account
-        accounts = get_accounts()
-        acct_map = {a['name']: a['id'] for a in accounts}
-        acct_names = list(acct_map.keys())
-        if acct_names:
-            credit_choice = st.selectbox("Credit proceeds to", ["Do not credit to account (manual)"] + acct_names)
-            credit_account_id = acct_map.get(credit_choice) if credit_choice in acct_map else None
-        else:
-            credit_account_id = None
+            # Redeem UI
+            with st.expander("Redeem / Partial redeem"):
+                max_redeem = inv['principal_remaining']
+                redeem_amount = st.number_input(f"Amount to redeem (max ₹{max_redeem:.2f})", min_value=0.0, max_value=max_redeem, format="%.2f", key=f"redeem_amt_{inv['id']}")
+                qty = None
+                if inv.get('quantity') is not None and inv.get('unit_label'):
+                    ppu = inv.get('current_price_per_unit') or inv.get('purchase_price_per_unit')
+                    st.write(f"Unit: {inv.get('unit_label')} | Available qty: {inv.get('quantity')}")
+                    qty = st.number_input(f"Quantity to redeem (max {inv.get('quantity')})", min_value=0.0, max_value=inv.get('quantity'), format="%.4f", key=f"redeem_qty_{inv['id']}")
+                    st.write(f"Using price per unit: {ppu if ppu else 'N/A'}")
 
-        if st.button("Redeem selected investment"):
-            try:
-                inv_id = inv_map[sel]
-                ra = redeem_amt if redeem_amt > 0 else None
-                ok = redeem_investment(inv_id, redeem_amount=ra, credit_account=credit_account_id)
-                if ok:
-                    st.success("Investment redeemed & account credited (if selected).")
-                    st.rerun()
+                acct_map = {a['name']: a['id'] for a in get_accounts()}
+                acct_options = ["<Do not credit>"] + list(acct_map.keys())
+                default_idx = 0
+                if "Main" in acct_map:
+                    default_idx = acct_options.index("Main")
+                credit_choice = st.selectbox("Credit proceeds to", acct_options, index=default_idx, key=f"redeem_credit_{inv['id']}")
+                credit_id = acct_map.get(credit_choice) if credit_choice and credit_choice != "<Do not credit>" else None
+                note = st.text_input("Note (optional)", key=f"redeem_note_{inv['id']}")
+                if st.button(f"Redeem now (id {inv['id']})", key=f"redeem_btn_{inv['id']}"):
+                    try:
+                        if qty and qty > 0:
+                            settlement_id = redeem_investment(inv['id'], quantity=qty, credit_account=credit_id, note=note)
+                        else:
+                            if redeem_amount <= 0:
+                                st.error("Enter amount to redeem or quantity")
+                                continue
+                            settlement_id = redeem_investment(inv['id'], amount=redeem_amount, credit_account=credit_id, note=note)
+                        st.success(f"Redeemed (settlement id {settlement_id}).")
+                        st.experimental_rerun()
+                    except Exception as ex:
+                        st.error(f"Failed to redeem: {ex}")
+
+            # Details & settlement history
+            with st.expander("Details & settlements"):
+                inv_full = get_investment_by_id(inv['id'])
+                # Display key fields
+                st.write({
+                    'id': inv_full['id'],
+                    'type': inv_full['type'],
+                    'amount': f"₹{inv_full['amount']:.2f}",
+                    'principal_remaining': f"₹{inv_full['principal_remaining']:.2f}",
+                    'quantity': inv_full.get('quantity'),
+                    'unit': inv_full.get('unit_label'),
+                    'current_price_per_unit': inv_full.get('current_price_per_unit'),
+                    'current_value': inv_full.get('current_value'),
+                    'status': inv_full.get('status'),
+                    'notes': inv_full.get('notes')
+                })
+                st.markdown("**Settlement history**")
+                settlements = get_settlements_for_investment(inv['id'])
+                if not settlements:
+                    st.info("No settlements yet for this investment.")
                 else:
-                    st.warning("Could not redeem (maybe already redeemed).")
-            except Exception as ex:
-                st.error(f"Failed to redeem: {ex}")
+                    import pandas as pd
+                    df = pd.DataFrame(settlements)
+                    st.dataframe(df, use_container_width=True)
 
-
-# ===========================================================
-# DELETE EXPENSE
-# ===========================================================
-elif choice == "Delete Expense":
-    st.subheader("🗑️ Delete Expense")
-    df = get_expenses()
-    if df.empty:
-        st.info("No expenses to delete.")
-    else:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.date
-        df["display"] = df.apply(
-            lambda x: f"{int(x['id'])} - ₹{x['Amount']} | {x['Description']} on {x['Date']} [{x['Category']}]",
-            axis=1,
-        )
-        selection = st.selectbox("Select expense:", df["display"].tolist())
-        if selection:
-            eid = int(selection.split(" - ")[0])
-            if st.button("Delete Selected"):
-                try:
-                    ok = delete_expense_by_id(eid)
-                    if ok:
-                        st.success("✅ Expense deleted.")
-                        st.rerun()
-                    else:
-                        st.warning("⚠️ Expense not found.")
-                except Exception as ex:
-                    st.error(f"Failed: {ex}")
+    st.markdown("---")
