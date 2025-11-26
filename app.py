@@ -174,314 +174,607 @@ def build_dropdown_options(base_options, predicted):
 if choice == "📊 Analytics / Dashboard":
     st.title("📊 ExpenX — Analytics & Dashboard")
 
-    import matplotlib.pyplot as plt
-    import calendar
-    from app.visualizer import get_dashboard_data
+    import plotly.express as px
+    import plotly.graph_objects as go
+    import pandas as pd
+    import io
     from datetime import datetime
+    from app.visualizer import get_dashboard_data
+    from streamlit import session_state as ss
 
-    # ---------------------
-    # Controls: Period Mode
-    # ---------------------
-    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 1, 2])
-    with col_ctrl1:
-        period_mode = st.selectbox("Period mode", ["month", "year", "range"], index=0, help="Choose month / year / custom range for period-restricted widgets")
-    # reference date stored in session for navigation
-    if 'dashboard_ref_date' not in st.session_state:
-        st.session_state.dashboard_ref_date = datetime.now()
-    if 'dashboard_range' not in st.session_state:
-        st.session_state.dashboard_range = (datetime.now().replace(day=1), datetime.now())
+    PLOTLY_TEMPLATE = "plotly_dark"
+    DARK_BG = "#0b1320"
+    CARD_BG = "#0f1724"
+    ACCENT = "#2dd4bf"
+    WARNING = "#ff7b6b"
+    POSITIVE = "#6ee7b7"
 
-    # Prev / next navigation
-    with col_ctrl2:
+    # ---------- utils ----------
+    def fmt_cur(v):
+        try:
+            return f"₹{float(v):,.0f}"
+        except Exception:
+            return "₹0"
+
+    def to_csv_bytes(df: pd.DataFrame) -> bytes:
+        buf = io.BytesIO()
+        df.to_csv(buf, index=False, encoding="utf-8")
+        return buf.getvalue()
+
+    def safe_df(x):
+        return (x is not None) and (hasattr(x, "empty") and not x.empty) or (isinstance(x, pd.DataFrame) and not x.empty)
+
+    # session defaults
+    if 'dashboard_ref_date' not in ss:
+        ss.dashboard_ref_date = datetime.now()
+    if 'dashboard_range' not in ss:
+        ss.dashboard_range = (datetime.now().replace(day=1), datetime.now())
+    if 'dashboard_category_filter' not in ss:
+        ss.dashboard_category_filter = None
+    if 'dashboard_inv_filter' not in ss:
+        ss.dashboard_inv_filter = None
+
+    # ---------- Controls: period + nav + trend ----------
+    cL, cM, cR = st.columns([3,1,2])
+    with cL:
+        period_mode = st.selectbox("Period mode", ["month", "year", "range"], index=0,
+                                   help="Choose month / year / custom range for overview widgets")
+    with cM:
         if period_mode == 'month':
             if st.button("← Prev"):
-                ref = st.session_state.dashboard_ref_date
-                # move back one month
+                ref = ss.dashboard_ref_date
                 y, m = ref.year, ref.month - 1
                 if m < 1:
-                    y -= 1
-                    m = 12
-                st.session_state.dashboard_ref_date = ref.replace(year=y, month=m, day=1)
+                    y -= 1; m = 12
+                ss.dashboard_ref_date = ref.replace(year=y, month=m, day=1)
             if st.button("Next →"):
-                ref = st.session_state.dashboard_ref_date
+                ref = ss.dashboard_ref_date
                 y, m = ref.year, ref.month + 1
                 if m > 12:
-                    y += 1
-                    m = 1
-                st.session_state.dashboard_ref_date = ref.replace(year=y, month=m, day=1)
+                    y += 1; m = 1
+                ss.dashboard_ref_date = ref.replace(year=y, month=m, day=1)
         elif period_mode == 'year':
             if st.button("← Prev"):
-                st.session_state.dashboard_ref_date = st.session_state.dashboard_ref_date.replace(year=st.session_state.dashboard_ref_date.year - 1)
+                ss.dashboard_ref_date = ss.dashboard_ref_date.replace(year=ss.dashboard_ref_date.year - 1)
             if st.button("Next →"):
-                st.session_state.dashboard_ref_date = st.session_state.dashboard_ref_date.replace(year=st.session_state.dashboard_ref_date.year + 1)
-        else:
-            # range mode - no prev/next
-            pass
-
-    # Range / date inputs
-    with col_ctrl3:
+                ss.dashboard_ref_date = ss.dashboard_ref_date.replace(year=ss.dashboard_ref_date.year + 1)
+    with cR:
         if period_mode == 'month':
-            # show current month label and a date_input to jump quick
-            rd = st.date_input("Reference month (pick any day in month)", value=st.session_state.dashboard_ref_date.date())
-            st.session_state.dashboard_ref_date = datetime(rd.year, rd.month, rd.day)
+            rd = st.date_input("Reference month (pick any day)", value=ss.dashboard_ref_date.date())
+            ss.dashboard_ref_date = datetime(rd.year, rd.month, rd.day)
         elif period_mode == 'year':
-            year_choice = st.number_input("Year", min_value=1970, max_value=2100, value=st.session_state.dashboard_ref_date.year)
-            st.session_state.dashboard_ref_date = st.session_state.dashboard_ref_date.replace(year=int(year_choice))
-        else:  # range
-            rs, re = st.date_input("Range (start, end)", value=(st.session_state.dashboard_range[0].date(), st.session_state.dashboard_range[1].date()))
-            st.session_state.dashboard_range = (datetime(rs.year, rs.month, rs.day), datetime(re.year, re.month, re.day))
-
-    # Trend months selector (for trend-only panels)
-    trend_months = st.sidebar.selectbox("Trend range (months)", options=[3, 6, 12, 24], index=2)
-
-    # ---------------------
-    # Fetch dashboard data (single call)
-    # ---------------------
-    if period_mode == 'month':
-        ref = st.session_state.dashboard_ref_date
-        data = get_dashboard_data(period_mode='month', reference_date=ref, trend_months=trend_months)
-    elif period_mode == 'year':
-        ref = st.session_state.dashboard_ref_date
-        data = get_dashboard_data(period_mode='year', reference_date=ref, trend_months=trend_months)
-    else:
-        rs, re = st.session_state.dashboard_range
-        data = get_dashboard_data(period_mode='range', range_start=rs, range_end=re, trend_months=trend_months)
-
-    # ---------------------
-    # Tabs: Overview | Trends | Accounts | Investments | Ledger & Insights
-    # ---------------------
-    tabs = st.tabs(["Overview", "Trends", "Accounts", "Investments", "Ledger & Insights"])
-
-    # ---------------------
-    # TAB: Overview (period-restricted)
-    # ---------------------
-    with tabs[0]:
-        p = data['period']
-        st.subheader(f"Overview — {p['start'].date()} → {p['end'].date()}")
-
-        # Net flow + Budget in first row
-        nf = data['net_flow']
-        b_ins = data['budget_insights']
-        col1, col2, col3 = st.columns([1.2, 1.2, 2])
-        with col1:
-            st.metric("Income", f"₹{nf['income']:.2f}")
-            st.metric("Expense", f"₹{nf['expense']:.2f}")
-        with col2:
-            st.metric("Net", f"₹{nf['net']:.2f}", delta=f"₹{(nf['income'] - nf['expense']):.2f}")
-        with col3:
-            # Budget small panel
-            budgets = data['budgets']
-            if budgets and budgets.get('total_budget') is not None:
-                tb = budgets['total_budget']
-                used = budgets['total_spent']
-                remaining = budgets['total_remaining']
-                st.write(f"**Monthly budget:** ₹{tb:.0f} — Spent: ₹{used:.0f} — Remaining: ₹{remaining:.0f}")
-                # simple gauge (matplotlib donut)
-                fig, ax = plt.subplots(figsize=(3,3))
-                ax.pie([used, max(0, tb - used)], labels=[f"Used ₹{used:.0f}", f"Remaining ₹{max(0, tb - used):.0f}"], autopct='%1.0f%%', startangle=90)
-                ax.axis('equal')
-                st.pyplot(fig)
-            else:
-                st.info("No total monthly budget set. Create a budget in Budgets.")
-
-        st.markdown("---")
-
-        # Category breakdown + Top categories
-        cb = data['category_breakdown']
-        if cb is None or cb.empty:
-            st.info("No expense data for this period.")
+            year_choice = st.number_input("Year", min_value=1970, max_value=2100, value=ss.dashboard_ref_date.year)
+            ss.dashboard_ref_date = ss.dashboard_ref_date.replace(year=int(year_choice))
         else:
-            c1, c2 = st.columns([1.4, 1])
-            with c1:
-                st.subheader("Category breakdown")
-                fig, ax = plt.subplots(figsize=(6, 4))
-                cb.head(12).plot(kind='pie', y=None, ax=ax, autopct='%1.1f%%', legend=False)
-                ax.set_ylabel("")
-                st.pyplot(fig)
-            with c2:
-                st.subheader("Top categories")
-                st.dataframe(data['top_categories'].rename_axis("Category").reset_index().rename(columns={'Category':'Category','top_categories':'Amount'}).head(10), use_container_width=True)
+            rs, re = st.date_input("Range (start, end)", value=(ss.dashboard_range[0].date(), ss.dashboard_range[1].date()))
+            ss.dashboard_range = (datetime(rs.year, rs.month, rs.day), datetime(re.year, re.month, re.day))
+
+    trend_months = st.sidebar.selectbox("Trend range (months)", [3, 6, 12, 24], index=2)
+
+    # ---------- Fetch data ----------
+    try:
+        if period_mode == 'month':
+            data = get_dashboard_data(period_mode='month', reference_date=ss.dashboard_ref_date, trend_months=trend_months)
+        elif period_mode == 'year':
+            data = get_dashboard_data(period_mode='year', reference_date=ss.dashboard_ref_date, trend_months=trend_months)
+        else:
+            rs, re = ss.dashboard_range
+            data = get_dashboard_data(period_mode='range', range_start=rs, range_end=re, trend_months=trend_months)
+    except Exception as e:
+        st.error(f"Failed to load dashboard data: {e}")
+        st.stop()
+
+    # ---------- Top-level filters ----------
+    cat_choices = []
+    try:
+        cb = data.get('category_breakdown', pd.Series(dtype=float))
+        if hasattr(cb, "index"):
+            cat_choices = list(cb.index)
+    except Exception:
+        cat_choices = []
+    with st.sidebar.expander("Filters", expanded=False):
+        if cat_choices:
+            sel_cat = st.multiselect("Filter categories (Overview)", options=cat_choices, default=ss.dashboard_category_filter or [])
+            ss.dashboard_category_filter = sel_cat if sel_cat else None
+        else:
+            st.write("No categories")
+        # investments filter
+        inv_raw = data.get('investments', {}).get('raw', pd.DataFrame())
+        inv_types = sorted(inv_raw['type'].dropna().unique().tolist()) if (hasattr(inv_raw, "empty") and not inv_raw.empty and 'type' in inv_raw.columns) else []
+        if inv_types:
+            sel_inv = st.multiselect("Investment types", options=inv_types, default=ss.dashboard_inv_filter or [])
+            ss.dashboard_inv_filter = sel_inv if sel_inv else None
+
+    # ---------- Download helper ----------
+    def download_df(df: pd.DataFrame, label: str):
+        if df is None or (hasattr(df, "empty") and df.empty):
+            st.info(f"No {label} to download.")
+            return
+        b = to_csv_bytes(df)
+        st.download_button(f"Download {label} CSV", data=b, file_name=f"{label}.csv", mime="text/csv")
+
+    # ---------- Tabs ----------
+    tabs = st.tabs(["Overview", "Trends", "Accounts", "Investments", "Ledger & Insights", "Data Export"])
+
+    # ----------------- OVERVIEW -----------------
+    with tabs[0]:
+        p = data.get('period', {})
+        start = p.get('start'); end = p.get('end')
+        st.subheader(f"Overview — {start.date() if start else 'N/A'} → {end.date() if end else 'N/A'}")
+
+        # Net Flow + Budget
+        net = data.get('net_flow', {'income':0.0,'expense':0.0,'net':0.0})
+        budgets = data.get('budgets', {})
+        col1, col2, col3, col4 = st.columns([1,1,1,1])
+        col1.metric("Income", fmt_cur(net.get('income', 0.0)))
+        col2.metric("Expense", fmt_cur(net.get('expense', 0.0)))
+        col3.metric("Net Flow", fmt_cur(net.get('net', 0.0)))
+        if budgets and budgets.get('total_budget') is not None:
+            col4.metric("Budget Remaining", fmt_cur(budgets.get('total_remaining', 0.0)))
+        else:
+            col4.metric("Budget Remaining", "Not Set")
 
         st.markdown("---")
 
-        # Daily spending pattern
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Net Flow Overview")
+
+            income_val = net.get('income', 0)
+            expense_val = net.get('expense', 0)
+
+            fig = go.Figure(
+                data=go.Pie(
+                    values=[income_val, expense_val],
+                    labels=["Income", "Expense"],
+                    hole=0.45,
+                    marker=dict(colors=["#2dd4bf", "#ff7b6b"]),
+                    hovertemplate="%{label}: ₹%{value:,.0f}<extra></extra>"
+                )
+            )
+
+            fig.update_layout(
+                template=PLOTLY_TEMPLATE,
+                height=320,
+                paper_bgcolor=DARK_BG,
+                plot_bgcolor=DARK_BG,
+                showlegend=True
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            if budgets and budgets.get('total_budget') is not None:
+                st.subheader("Budget Usage")
+
+                total_b = budgets['total_budget']
+                spent_b = budgets['total_spent']
+                rem_b = budgets['total_remaining']
+
+                fig2 = go.Figure(
+                    data=go.Pie(
+                        values=[spent_b, rem_b],
+                        labels=["Spent", "Remaining"],
+                        hole=0.45,
+                        marker=dict(colors=["#ff7b6b", "#2dd4bf"]),
+                        hovertemplate="%{label}: ₹%{value:,.0f}<extra></extra>"
+                    )
+                )
+
+                fig2.update_layout(
+                    template=PLOTLY_TEMPLATE,
+                    height=320,
+                    paper_bgcolor=DARK_BG,
+                    plot_bgcolor=DARK_BG,
+                    showlegend=True
+                )
+
+                st.plotly_chart(fig2, use_container_width=True)
+        st.markdown("---")
+
+
+
+        # Category Donut + Top categories
+        cb = data.get('category_breakdown', pd.Series(dtype=float))
+        if not (cb is None or (hasattr(cb,'empty') and cb.empty)):
+            if ss.dashboard_category_filter:
+                cb = cb[cb.index.isin(ss.dashboard_category_filter)]
+            series = cb.fillna(0)
+            series = series[series > 0]
+            if series.sum() <= 0:
+                st.info("No meaningful category spend to display.")
+            else:
+                left, right = st.columns([2,1])
+                with left:
+                    st.subheader("Category breakdown (donut)")
+                    fig = px.pie(values=series.values, names=series.index, hole=0.45, template=PLOTLY_TEMPLATE,
+                                 color_discrete_sequence=px.colors.sequential.Blues)
+                    # INR hover
+                    fig.update_traces(textinfo="percent+label", hovertemplate="%{label}: ₹%{value:,.0f}<extra></extra>")
+                    fig.update_layout(height=420, paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG)
+                    st.plotly_chart(fig, use_container_width=True)
+                with right:
+                    st.subheader("Top categories")
+                    top_df = pd.DataFrame({'Category': series.index, 'Amount': series.values})
+                    top_df['Amount_display'] = top_df['Amount'].map(lambda x: fmt_cur(x))
+                    st.dataframe(top_df[['Category','Amount_display']].rename(columns={'Amount_display':'Amount'}), use_container_width=True)
+                    download_df(top_df[['Category','Amount']], "top_categories")
+        else:
+            st.info("No expense data for this period.")
+
+        st.markdown("---")
+
+        # Daily Spending pattern
         st.subheader("Daily spending pattern")
-        daily_df = data['daily_spend']
-        if daily_df is None or daily_df.empty:
+        daily_df = data.get('daily_spend', pd.DataFrame())
+        if daily_df is None or (hasattr(daily_df,'empty') and daily_df.empty):
             st.info("No daily spend data.")
         else:
-            fig, ax = plt.subplots(figsize=(10, 3))
-            ax.bar(daily_df['Date'], daily_df['daily_spend'])
-            ax.set_ylabel("Amount (₹)")
-            ax.set_title("Daily spend")
-            st.pyplot(fig)
+            try:
+                daily_df['Date'] = pd.to_datetime(daily_df['Date'])
+                days_span = (daily_df['Date'].max() - daily_df['Date'].min()).days
+                if days_span > 120:
+                    plot_df = daily_df.set_index('Date').resample('W')['daily_spend'].sum().reset_index().rename(columns={'daily_spend':'value'})
+                    xlabel = "Week"
+                else:
+                    plot_df = daily_df.rename(columns={'daily_spend':'value'})
+                    xlabel = "Day"
+                fig = px.bar(plot_df, x=plot_df.columns[0], y='value', labels={plot_df.columns[0]: xlabel, 'value': 'Amount (₹)'}, template=PLOTLY_TEMPLATE, height=340)
+                st.plotly_chart(fig, use_container_width=True)
+                download_df(plot_df, "daily_spend")
+            except Exception as e:
+                st.error(f"Failed to render daily spend: {e}")
 
         st.markdown("---")
 
-        # Income source split + Heatmap (side-by-side)
-        # s1, s2 = st.columns([1, 1])
-        # with s1:
-        st.subheader("Income sources")
-        inc_split = data['income_split']
-        if inc_split is None or inc_split.empty:
+        st.subheader("Income source split")
+        inc_split = data.get('income_split', pd.Series(dtype=float))
+        if inc_split is None or (hasattr(inc_split,'empty') and inc_split.empty) or inc_split.sum() == 0:
             st.info("No income data for this period.")
         else:
-            fig, ax = plt.subplots(figsize=(4, 3))
-            inc_split.plot(kind='pie', y=None, ax=ax, autopct='%1.1f%%', legend=False)
-            ax.set_ylabel("")
-            st.pyplot(fig)
-        # with s2:
-        #     st.subheader("Spending heatmap (day × hour)")
-        #     hm = data['heatmap']
-        #     if hm is None or hm.empty:
-        #         st.info("No heatmap data (missing created_at or little data).")
-        #     else:
-        #         fig, ax = plt.subplots(figsize=(10, 3))
-        #         im = ax.imshow(hm.values, aspect='auto')
-        #         ax.set_yticks(range(len(hm.index)))
-        #         ax.set_yticklabels(hm.index)
-        #         ax.set_xlabel("Hour")
-        #         fig.colorbar(im, ax=ax)
-        #         st.pyplot(fig)
+            series = inc_split.fillna(0)
+            series = series[series > 0]
+            fig = px.pie(values=series.values, names=series.index, hole=0.45, template=PLOTLY_TEMPLATE,
+                            color_discrete_sequence=px.colors.sequential.Teal)
+            fig.update_traces(textinfo="percent+label", hovertemplate="%{label}: ₹%{value:,.0f}<extra></extra>")
+            fig.update_layout(height=320, paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG)
+            st.plotly_chart(fig, use_container_width=True)
+            download_df(pd.DataFrame({'source':series.index, 'amount':series.values}), "income_split")
 
         st.markdown("---")
 
-        # Recurring & Anomalies
-        r1, r2 = st.columns(2)
-        with r1:
-            st.subheader("Recurring expenses (auto-detected)")
-            rec = data['recurring']
-            if rec is None or rec.empty:
-                st.info("No recurring expenses detected in this period.")
-            else:
-                st.dataframe(rec.head(50))
-        with r2:
-            st.subheader("Anomalies (outliers)")
-            anom = data['anomalies']
-            if anom is None or anom.empty:
-                st.info("No anomalies detected.")
-            else:
-                st.dataframe(anom[['Date','Amount','Description','Category','z']].sort_values('z', ascending=False).head(50))
+        # ---------------------------------------------
+        # DAY-OF-WEEK SPENDING PATTERN (BAR CHART)
+        # ---------------------------------------------
+        st.subheader("Day-of-Week Spending Pattern")
 
-    # ---------------------
-    # TAB: Trends (multi-month)
-    # ---------------------
+        # Compute day-of-week spend
+        if daily_df is None or (hasattr(daily_df,'empty') and daily_df.empty):
+            st.info("No spend data available for this period.")
+        else:
+            try:
+                daily_df['Date'] = pd.to_datetime(daily_df['Date'])
+                dow_df = (
+                    daily_df.groupby(daily_df['Date'].dt.day_name())['daily_spend']
+                    .sum()
+                    .reindex(["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"])
+                    .reset_index()
+                    .rename(columns={"Date":"day","daily_spend":"amount"})
+                )
+                fig = px.bar(
+                    dow_df,
+                    x="day",
+                    y="amount",
+                    labels={"day":"Day of Week", "amount":"Amount (₹)"},
+                    template=PLOTLY_TEMPLATE,
+                    color="amount",
+                    color_continuous_scale=px.colors.sequential.Blues,
+                    height=320
+                )
+                fig.update_layout(paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG)
+                fig.update_traces(hovertemplate="₹%{y:,.0f} spent on %{x}<extra></extra>")
+                st.plotly_chart(fig, use_container_width=True)
+
+                download_df(dow_df, "day_of_week_spending")
+
+            except Exception as e:
+                st.error(f"Failed to generate day-of-week pattern: {e}")
+
+        st.markdown("---")
+
+        # ---------------------------------------------
+        # MONTHLY CALENDAR HEATMAP (CLASSIC GRID)
+        # ---------------------------------------------
+        st.subheader("Calendar Heatmap (Monthly)")
+
+        try:
+            # Determine month start & end
+            if period_mode == "month":
+                ref = ss.dashboard_ref_date
+                year = ref.year
+                month = ref.month
+            elif period_mode == "year":
+                # default to current month in the selected year
+                ref = ss.dashboard_ref_date
+                year = ref.year
+                month = ref.month
+            else:
+                # range mode → take start month
+                rs, _ = ss.dashboard_range
+                year = rs.year
+                month = rs.month
+
+            # Get a calendar matrix for the month
+            import calendar
+            cal = calendar.Calendar(firstweekday=0)  # Monday=0
+            month_days = cal.monthdayscalendar(year, month)
+
+            # Create mapping date → amount
+            daily_map = dict(zip(pd.to_datetime(daily_df['Date']).dt.date, daily_df['daily_spend']))
+
+            # Prepare heatmap matrix (0 if no spend)
+            heat_values = []
+            day_labels = []
+
+            for week in month_days:
+                row = []
+                labels = []
+                for d in week:
+                    if d == 0:
+                        # No date on this cell
+                        row.append(None)
+                        labels.append("")
+                    else:
+                        date_obj = datetime(year, month, d).date()
+                        amt = float(daily_map.get(date_obj, 0))
+                        row.append(float(amt))
+                        labels.append(str(d))
+                heat_values.append(row)
+                day_labels.append(labels)
+
+            # Build axes
+            x_labels = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+            y_labels = [f"Week {i+1}" for i in range(len(heat_values))]
+
+            # Convert to plotly heatmap
+            fig = go.Figure(
+                data=go.Heatmap(
+                    z=heat_values,
+                    x=x_labels,
+                    y=y_labels,
+                    text=day_labels,
+                    texttemplate="%{text}",               # <--- FIXED (shows numbers)
+                    textfont={"color": "black", "size": 20},
+                    colorscale="Blues",
+                    hovertemplate="Day %{text}<br>Spend: ₹%{z:,.0f}<extra></extra>",
+                    showscale=True
+                )
+            )
+
+            fig.update_layout(
+                height=120 * len(heat_values),  # Auto height per month
+                paper_bgcolor=DARK_BG,
+                plot_bgcolor=DARK_BG,
+                xaxis=dict(side="top"),
+                margin=dict(l=10, r=10, t=30, b=10)
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Prepare flat export
+            flat_rows = []
+            for row_idx, week in enumerate(heat_values):
+                for col_idx, amt in enumerate(week):
+                    day_label = day_labels[row_idx][col_idx]
+                    if day_label != "":
+                        flat_rows.append({
+                            "date": f"{year}-{month:02d}-{int(day_label):02d}",
+                            "amount": amt
+                        })
+            cal_df = pd.DataFrame(flat_rows)
+            download_df(cal_df, "calendar_heatmap")
+
+        except Exception as e:
+            st.error(f"Failed to generate calendar heatmap: {e}")
+            st.markdown("---")        
+
+            # Recurring & anomalies (collapsible)
+            rec = data.get('recurring', pd.DataFrame())
+            anom = data.get('anomalies', pd.DataFrame())
+            with st.expander("Recurring expenses (auto-detected)", expanded=False):
+                if rec is None or (hasattr(rec,'empty') and rec.empty):
+                    st.info("No recurring items detected.")
+                else:
+                    st.dataframe(rec.head(200))
+                    download_df(rec, "recurring_expenses")
+            with st.expander("Anomalies / Outliers", expanded=False):
+                if anom is None or (hasattr(anom,'empty') and anom.empty):
+                    st.info("No anomalies detected.")
+                else:
+                    cols = [c for c in ['Date','Amount','Description','Category','z'] if c in anom.columns]
+                    st.dataframe(anom[cols].sort_values('z', ascending=False).head(200))
+                    download_df(anom[cols], "anomalies")
+
+        st.markdown("---")
+
+        # Budget insights
+        st.subheader("Budget insights")
+        b_ins = data.get('budget_insights', [])
+        if not b_ins:
+            st.info("No budget insights available.")
+        else:
+            for sg in b_ins:
+                color = WARNING if ("exceed" in sg.lower() or "overspent" in sg.lower() or "⚠" in sg) else POSITIVE
+                st.markdown(f"<div style='color:{color}'>• {sg}</div>", unsafe_allow_html=True)
+
+    # ----------------- TRENDS -----------------
     with tabs[1]:
-        st.subheader(f"Trends — Last {trend_months} months")
-        exp_tr = data['trend']['expense_trend']
-        inc_tr = data['trend']['income_trend']
-        cat_tr = data['trend']['category_trend']
-        port_tr = data['trend']['portfolio_trend']
+        st.subheader(f"Trends — last {trend_months} months")
+        exp_tr = data.get('trend', {}).get('expense_trend', pd.DataFrame())
+        inc_tr = data.get('trend', {}).get('income_trend', pd.DataFrame())
+        cat_tr = data.get('trend', {}).get('category_trend', pd.DataFrame())
+        port_tr = data.get('trend', {}).get('portfolio_trend', pd.DataFrame())
 
-        # Expense vs Income line
-        if (exp_tr is None or exp_tr.empty) and (inc_tr is None or inc_tr.empty):
+        if (exp_tr is None or (hasattr(exp_tr,'empty') and exp_tr.empty)) and (inc_tr is None or (hasattr(inc_tr,'empty') and inc_tr.empty)):
             st.info("Not enough data for trend charts.")
         else:
-            fig, ax = plt.subplots(figsize=(10, 3))
-            if not exp_tr.empty:
-                ax.plot(exp_tr.index.to_pydatetime(), exp_tr['total'].values, marker='o', label='Expenses')
-            if not inc_tr.empty:
-                ax.plot(inc_tr.index.to_pydatetime(), inc_tr['total'].values, marker='o', label='Income')
-            ax.set_title("Income vs Expense (monthly)")
-            ax.legend()
-            st.pyplot(fig)
+            fig = go.Figure()
+            if exp_tr is not None and not (hasattr(exp_tr,'empty') and exp_tr.empty):
+                fig.add_trace(go.Scatter(x=exp_tr.index.to_pydatetime(), y=exp_tr['total'].values, mode='lines+markers', name='Expenses', line=dict(color="#ff7b6b")))
+            if inc_tr is not None and not (hasattr(inc_tr,'empty') and inc_tr.empty):
+                fig.add_trace(go.Scatter(x=inc_tr.index.to_pydatetime(), y=inc_tr['total'].values, mode='lines+markers', name='Income', line=dict(color=ACCENT)))
+            fig.update_layout(template=PLOTLY_TEMPLATE, height=360, paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG, xaxis_title="Month", yaxis_title="Amount (₹)")
+            st.plotly_chart(fig, use_container_width=True)
+            if exp_tr is not None and not (hasattr(exp_tr,'empty') and exp_tr.empty):
+                download_df(exp_tr.reset_index().rename(columns={'index':'period','total':'expense'}), "expense_trend")
+            if inc_tr is not None and not (hasattr(inc_tr,'empty') and inc_tr.empty):
+                download_df(inc_tr.reset_index().rename(columns={'index':'period','total':'income'}), "income_trend")
 
         st.markdown("---")
-
-        # Category trend area (stacked)
-        st.subheader("Category trend (area)")
-        if cat_tr is None or cat_tr.empty:
+        st.subheader("Category trend (stacked area)")
+        if cat_tr is None or (hasattr(cat_tr,'empty') and cat_tr.empty):
             st.info("No category trend data.")
         else:
-            fig, ax = plt.subplots(figsize=(10, 4))
-            cat_tr.plot(kind='area', stacked=True, ax=ax)
-            ax.set_title("Category spend over time")
-            st.pyplot(fig)
+            fig = go.Figure()
+            for col in cat_tr.columns:
+                fig.add_trace(go.Scatter(x=cat_tr.index.to_pydatetime(), y=cat_tr[col].values, stackgroup='one', name=col))
+            fig.update_layout(template=PLOTLY_TEMPLATE, height=420, paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG, xaxis_title="Month", yaxis_title="Amount (₹)")
+            st.plotly_chart(fig, use_container_width=True)
+            download_df(cat_tr.reset_index().rename(columns={'index':'month'}).melt(id_vars='month', var_name='category', value_name='amount'), "category_trend")
 
         st.markdown("---")
-
-        # Portfolio trend
         st.subheader("Portfolio value trend")
-        if port_tr is None or port_tr.empty:
-            st.info("No portfolio trend data (historical snapshots required).")
+        if port_tr is None or (hasattr(port_tr,'empty') and port_tr.empty):
+            st.info("No portfolio trend snapshots available.")
         else:
-            fig, ax = plt.subplots(figsize=(10, 3))
-            ax.plot(port_tr['Date'], port_tr['value'], marker='o')
-            ax.set_title("Portfolio Value")
-            st.pyplot(fig)
+            try:
+                fig = px.line(port_tr, x='Date', y='value', title='Portfolio Value', template=PLOTLY_TEMPLATE)
+                st.plotly_chart(fig, use_container_width=True)
+                download_df(port_tr, "portfolio_trend")
+            except Exception as e:
+                st.error(f"Unable to render portfolio trend: {e}")
 
-    # ---------------------
-    # TAB: Accounts
-    # ---------------------
+    # ----------------- ACCOUNTS -----------------
     with tabs[2]:
-        st.subheader("Accounts — Snapshot")
-        accounts = data['accounts']
-        if accounts is None or accounts.empty:
+        st.subheader("Accounts snapshot")
+        accounts = data.get('accounts', pd.DataFrame())
+        if accounts is None or (hasattr(accounts,'empty') and accounts.empty):
             st.info("No accounts configured.")
         else:
+            if 'balance' in accounts.columns:
+                accounts['balance'] = pd.to_numeric(accounts['balance'], errors='coerce').fillna(0.0)
             st.dataframe(accounts[['id','name','balance','currency','kind']].sort_values(by='balance', ascending=False), use_container_width=True)
-            # account distribution pie
-            fig, ax = plt.subplots(figsize=(6,4))
-            try:
-                series = accounts.set_index('name')['balance']
-                series.plot(kind='pie', ax=ax, autopct='%1.1f%%')
-                ax.set_ylabel("")
-            except Exception:
-                ax.text(0.5, 0.5, 'No distribution data', ha='center')
-            st.pyplot(fig)
+            if accounts['balance'].sum() > 0:
+                series = accounts.set_index('name')['balance'].fillna(0)
+                fig = px.pie(values=series.values, names=series.index, hole=0.45, template=PLOTLY_TEMPLATE, color_discrete_sequence=px.colors.sequential.Teal)
+                fig.update_traces(textinfo='percent+label', hovertemplate="%{label}: ₹%{value:,.0f}<extra></extra>")
+                st.plotly_chart(fig, use_container_width=True)
+                download_df(accounts[['name','balance']], "accounts")
+            else:
+                st.info("No meaningful balances to show.")
 
-    # ---------------------
-    # TAB: Investments
-    # ---------------------
+    # ----------------- INVESTMENTS -----------------
     with tabs[3]:
         st.subheader("Investments")
-        inv = data['investments']
-        inv_summary = inv['summary']
+        inv = data.get('investments', {})
+        inv_summary = inv.get('summary', {'total_principal':0,'total_remaining':0,'current_value':0})
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total Principal", f"₹{inv_summary['total_principal']:.2f}")
-        c2.metric("Principal Remaining", f"₹{inv_summary['total_remaining']:.2f}")
-        c3.metric("Current Value", f"₹{inv_summary['current_value']:.2f}")
-
+        c1.metric("Total Principal", fmt_cur(inv_summary.get('total_principal',0)))
+        c2.metric("Principal Remaining", fmt_cur(inv_summary.get('total_remaining',0)))
+        c3.metric("Current Value", fmt_cur(inv_summary.get('current_value',0)))
         st.markdown("---")
-        st.subheader("Investment gain/loss")
-        gain_tbl = inv['gain_table']
-        if gain_tbl is None or gain_tbl.empty:
-            st.info("No gain/loss data available (current_value missing).")
+        gain_tbl = inv.get('gain_table', pd.DataFrame())
+        if gain_tbl is None or (hasattr(gain_tbl,'empty') and gain_tbl.empty):
+            st.info("No gain/loss data available.")
         else:
-            st.dataframe(gain_tbl.sort_values('gain', ascending=False).head(50), use_container_width=True)
-
+            st.dataframe(gain_tbl.sort_values('gain', ascending=False).head(200))
+            download_df(gain_tbl, "investment_gain_loss")
         st.markdown("---")
-        st.subheader("Investment distribution")
-        inv_dist = inv['distribution']
-        if inv_dist is None or inv_dist.empty or inv_dist.sum() == 0:
-            st.info("No distribution data to display.")
+        inv_dist = inv.get('distribution', pd.Series(dtype=float))
+        if inv_dist is None or (hasattr(inv_dist,'empty') and inv_dist.empty) or inv_dist.sum() == 0:
+            st.info("No distribution data.")
         else:
             inv_dist = inv_dist.fillna(0)
-            fig, ax = plt.subplots(figsize=(6,4))
-            inv_dist.plot(kind='pie', ax=ax, autopct='%1.1f%%')
-            ax.set_ylabel("")
-            st.pyplot(fig)
+            fig = px.pie(values=inv_dist.values, names=inv_dist.index, hole=0.45, template=PLOTLY_TEMPLATE, color_discrete_sequence=px.colors.sequential.Agsunset)
+            fig.update_traces(textinfo="percent+label", hovertemplate="%{label}: ₹%{value:,.0f}<extra></extra>")
+            st.plotly_chart(fig, use_container_width=True)
+            download_df(pd.DataFrame({'type':inv_dist.index, 'value':inv_dist.values}), "investment_distribution")
 
-    # ---------------------
-    # TAB: Ledger & Insights
-    # ---------------------
+    # ----------------- LEDGER & INSIGHTS -----------------
     with tabs[4]:
         st.subheader("Ledger & Insights")
-        ledger = data['ledger']
+        ledger = data.get('ledger', {})
         st.write(ledger)
+        st.markdown("---")
+        st.subheader("Budget insights")
+        ins = data.get('budget_insights', [])
+        if not ins:
+            st.info("No budget insights.")
+        else:
+            for it in ins:
+                color = WARNING if ("exceed" in it.lower() or "overspent" in it.lower() or "⚠" in it) else POSITIVE
+                st.markdown(f"<div style='color:{color}'>• {it}</div>", unsafe_allow_html=True)
 
         st.markdown("---")
-        st.subheader("Budget insights (auto)")
-        for insight in data['budget_insights']:
-            st.write("•", insight)
+        raw = data.get('raw', {})
+        st.write("Expenses rows:", 0 if raw.get('expenses') is None else (len(raw.get('expenses')) if hasattr(raw.get('expenses'),'__len__') else 0))
+        st.write("Income rows:", 0 if raw.get('income') is None else (len(raw.get('income')) if hasattr(raw.get('income'),'__len__') else 0))
+        st.write("Budget rows:", 0 if raw.get('budgets') is None else (len(raw.get('budgets')) if hasattr(raw.get('budgets'),'__len__') else 0))
 
-        st.markdown("---")
-        st.subheader("Raw data quick links")
-        st.write("Expenses rows:", len(data['raw']['expenses']))
-        st.write("Income rows:", len(data['raw']['income']))
-        st.write("Budget rows:", len(data['raw']['budgets']))
+    # ----------------- DATA EXPORT (Simple mode) -----------------
+    with tabs[5]:
+        st.subheader("Data Export")
+        exp_df = data.get('raw', {}).get('expenses', pd.DataFrame())
+        inc_df = data.get('raw', {}).get('income', pd.DataFrame())
+        bud_df = data.get('raw', {}).get('budgets', pd.DataFrame())
 
+        export_mode = st.radio("Export Mode", ["Current Period", "Custom Range", "Monthly Export", "Yearly Export", "Full Dataset"], index=0)
 
+        if export_mode == "Current Period":
+            st.markdown("Download data for the currently selected period (Overview).")
+            exp_period = data.get('exp_period', pd.DataFrame())
+            inc_period = data.get('inc_period', pd.DataFrame())
+            download_df(exp_period.reset_index(drop=True), "expenses_current_period")
+            download_df(inc_period.reset_index(drop=True), "income_current_period")
+        elif export_mode == "Custom Range":
+            rs, re = st.date_input("Choose range (start, end)", value=(ss.dashboard_range[0].date(), ss.dashboard_range[1].date()))
+            rs_dt = datetime(rs.year, rs.month, rs.day); re_dt = datetime(re.year, re.month, re.day)
+            # filter raw frames safely
+            try:
+                exp_f = exp_df[(pd.to_datetime(exp_df['Date']) >= rs_dt) & (pd.to_datetime(exp_df['Date']) <= re_dt)].reset_index(drop=True) if (exp_df is not None and not getattr(exp_df,'empty',True)) else pd.DataFrame()
+                inc_f = inc_df[(pd.to_datetime(inc_df['date']) >= rs_dt) & (pd.to_datetime(inc_df['date']) <= re_dt)].reset_index(drop=True) if (inc_df is not None and not getattr(inc_df,'empty',True)) else pd.DataFrame()
+            except Exception:
+                exp_f = pd.DataFrame(); inc_f = pd.DataFrame()
+            download_df(exp_f, f"expenses_{rs_dt.date()}_{re_dt.date()}")
+            download_df(inc_f, f"income_{rs_dt.date()}_{re_dt.date()}")
+        elif export_mode == "Monthly Export":
+            m = st.selectbox("Month", list(range(1,13)), index=ss.dashboard_ref_date.month-1)
+            y = st.number_input("Year", min_value=1970, max_value=2100, value=ss.dashboard_ref_date.year)
+            ms = datetime(y, m, 1)
+            # compute month end
+            if m == 12:
+                me = datetime(y+1, 1, 1) - pd.Timedelta(days=1)
+            else:
+                me = datetime(y, m+1, 1) - pd.Timedelta(days=1)
+            exp_f = exp_df[(pd.to_datetime(exp_df['Date']) >= ms) & (pd.to_datetime(exp_df['Date']) <= me)].reset_index(drop=True) if (exp_df is not None and not getattr(exp_df,'empty',True)) else pd.DataFrame()
+            inc_f = inc_df[(pd.to_datetime(inc_df['date']) >= ms) & (pd.to_datetime(inc_df['date']) <= me)].reset_index(drop=True) if (inc_df is not None and not getattr(inc_df,'empty',True)) else pd.DataFrame()
+            download_df(exp_f, f"expenses_{y}_{m:02d}")
+            download_df(inc_f, f"income_{y}_{m:02d}")
+        elif export_mode == "Yearly Export":
+            y = st.number_input("Year (export)", min_value=1970, max_value=2100, value=ss.dashboard_ref_date.year)
+            ys = datetime(y,1,1); ye = datetime(y,12,31)
+            exp_f = exp_df[(pd.to_datetime(exp_df['Date']) >= ys) & (pd.to_datetime(exp_df['Date']) <= ye)].reset_index(drop=True) if (exp_df is not None and not getattr(exp_df,'empty',True)) else pd.DataFrame()
+            inc_f = inc_df[(pd.to_datetime(inc_df['date']) >= ys) & (pd.to_datetime(inc_df['date']) <= ye)].reset_index(drop=True) if (inc_df is not None and not getattr(inc_df,'empty',True)) else pd.DataFrame()
+            download_df(exp_f, f"expenses_{y}")
+            download_df(inc_f, f"income_{y}")
+        else:  # Full Dataset
+            st.markdown("Export the full raw datasets (use with caution).")
+            download_df(exp_df.reset_index(drop=True) if exp_df is not None else pd.DataFrame(), "expenses_full")
+            download_df(inc_df.reset_index(drop=True) if inc_df is not None else pd.DataFrame(), "income_full")
+            download_df(bud_df.reset_index(drop=True) if bud_df is not None else pd.DataFrame(), "budgets_full")
+
+# End of block
 
 # ===========================================================
 # ADD EXPENSE
