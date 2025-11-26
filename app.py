@@ -3,6 +3,8 @@ import streamlit as st
 
 from datetime import date as dt_date
 import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime
 
 from app.tracker import (
     add_expense,
@@ -49,7 +51,18 @@ from app.investments import (
     _unit_label_for_type
 )
 
-from app.visualizer import show_dashboard
+from app.visualizer import (
+    get_month_range, get_year_range, clamp_to_date,
+    load_expenses_df, load_income_df, load_accounts_df, load_investments_df, load_budgets_df,
+    filter_expenses, filter_income, net_flow, category_breakdown, top_categories, daily_spend,
+    income_source_split, expense_trend, income_trend, category_trend_area, portfolio_trend,
+    spending_heatmap_matrix, detect_recurring, detect_anomalies,
+    investment_summary, investment_gain_loss, investment_distribution,
+    ledger_activity,
+    compute_budget_status, generate_budget_insights,
+    get_dashboard_data
+)
+
 
 # -----------------------------------------------------------
 # DATABASE INITIALIZATION & SCHEMA VALIDATION
@@ -135,6 +148,7 @@ menu = [
     "Transfer",
     "Ledger",
     "Investments",
+    "Budgets",
     "Delete Expense"
 ]
 choice = st.sidebar.selectbox("Menu", menu)
@@ -158,8 +172,315 @@ def build_dropdown_options(base_options, predicted):
 # ===========================================================
 
 if choice == "📊 Analytics / Dashboard":
-    show_dashboard()
-    st.stop()
+    st.title("📊 ExpenX — Analytics & Dashboard")
+
+    import matplotlib.pyplot as plt
+    import calendar
+    from app.visualizer import get_dashboard_data
+    from datetime import datetime
+
+    # ---------------------
+    # Controls: Period Mode
+    # ---------------------
+    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([3, 1, 2])
+    with col_ctrl1:
+        period_mode = st.selectbox("Period mode", ["month", "year", "range"], index=0, help="Choose month / year / custom range for period-restricted widgets")
+    # reference date stored in session for navigation
+    if 'dashboard_ref_date' not in st.session_state:
+        st.session_state.dashboard_ref_date = datetime.now()
+    if 'dashboard_range' not in st.session_state:
+        st.session_state.dashboard_range = (datetime.now().replace(day=1), datetime.now())
+
+    # Prev / next navigation
+    with col_ctrl2:
+        if period_mode == 'month':
+            if st.button("← Prev"):
+                ref = st.session_state.dashboard_ref_date
+                # move back one month
+                y, m = ref.year, ref.month - 1
+                if m < 1:
+                    y -= 1
+                    m = 12
+                st.session_state.dashboard_ref_date = ref.replace(year=y, month=m, day=1)
+            if st.button("Next →"):
+                ref = st.session_state.dashboard_ref_date
+                y, m = ref.year, ref.month + 1
+                if m > 12:
+                    y += 1
+                    m = 1
+                st.session_state.dashboard_ref_date = ref.replace(year=y, month=m, day=1)
+        elif period_mode == 'year':
+            if st.button("← Prev"):
+                st.session_state.dashboard_ref_date = st.session_state.dashboard_ref_date.replace(year=st.session_state.dashboard_ref_date.year - 1)
+            if st.button("Next →"):
+                st.session_state.dashboard_ref_date = st.session_state.dashboard_ref_date.replace(year=st.session_state.dashboard_ref_date.year + 1)
+        else:
+            # range mode - no prev/next
+            pass
+
+    # Range / date inputs
+    with col_ctrl3:
+        if period_mode == 'month':
+            # show current month label and a date_input to jump quick
+            rd = st.date_input("Reference month (pick any day in month)", value=st.session_state.dashboard_ref_date.date())
+            st.session_state.dashboard_ref_date = datetime(rd.year, rd.month, rd.day)
+        elif period_mode == 'year':
+            year_choice = st.number_input("Year", min_value=1970, max_value=2100, value=st.session_state.dashboard_ref_date.year)
+            st.session_state.dashboard_ref_date = st.session_state.dashboard_ref_date.replace(year=int(year_choice))
+        else:  # range
+            rs, re = st.date_input("Range (start, end)", value=(st.session_state.dashboard_range[0].date(), st.session_state.dashboard_range[1].date()))
+            st.session_state.dashboard_range = (datetime(rs.year, rs.month, rs.day), datetime(re.year, re.month, re.day))
+
+    # Trend months selector (for trend-only panels)
+    trend_months = st.sidebar.selectbox("Trend range (months)", options=[3, 6, 12, 24], index=2)
+
+    # ---------------------
+    # Fetch dashboard data (single call)
+    # ---------------------
+    if period_mode == 'month':
+        ref = st.session_state.dashboard_ref_date
+        data = get_dashboard_data(period_mode='month', reference_date=ref, trend_months=trend_months)
+    elif period_mode == 'year':
+        ref = st.session_state.dashboard_ref_date
+        data = get_dashboard_data(period_mode='year', reference_date=ref, trend_months=trend_months)
+    else:
+        rs, re = st.session_state.dashboard_range
+        data = get_dashboard_data(period_mode='range', range_start=rs, range_end=re, trend_months=trend_months)
+
+    # ---------------------
+    # Tabs: Overview | Trends | Accounts | Investments | Ledger & Insights
+    # ---------------------
+    tabs = st.tabs(["Overview", "Trends", "Accounts", "Investments", "Ledger & Insights"])
+
+    # ---------------------
+    # TAB: Overview (period-restricted)
+    # ---------------------
+    with tabs[0]:
+        p = data['period']
+        st.subheader(f"Overview — {p['start'].date()} → {p['end'].date()}")
+
+        # Net flow + Budget in first row
+        nf = data['net_flow']
+        b_ins = data['budget_insights']
+        col1, col2, col3 = st.columns([1.2, 1.2, 2])
+        with col1:
+            st.metric("Income", f"₹{nf['income']:.2f}")
+            st.metric("Expense", f"₹{nf['expense']:.2f}")
+        with col2:
+            st.metric("Net", f"₹{nf['net']:.2f}", delta=f"₹{(nf['income'] - nf['expense']):.2f}")
+        with col3:
+            # Budget small panel
+            budgets = data['budgets']
+            if budgets and budgets.get('total_budget') is not None:
+                tb = budgets['total_budget']
+                used = budgets['total_spent']
+                remaining = budgets['total_remaining']
+                st.write(f"**Monthly budget:** ₹{tb:.0f} — Spent: ₹{used:.0f} — Remaining: ₹{remaining:.0f}")
+                # simple gauge (matplotlib donut)
+                fig, ax = plt.subplots(figsize=(3,3))
+                ax.pie([used, max(0, tb - used)], labels=[f"Used ₹{used:.0f}", f"Remaining ₹{max(0, tb - used):.0f}"], autopct='%1.0f%%', startangle=90)
+                ax.axis('equal')
+                st.pyplot(fig)
+            else:
+                st.info("No total monthly budget set. Create a budget in Budgets.")
+
+        st.markdown("---")
+
+        # Category breakdown + Top categories
+        cb = data['category_breakdown']
+        if cb is None or cb.empty:
+            st.info("No expense data for this period.")
+        else:
+            c1, c2 = st.columns([1.4, 1])
+            with c1:
+                st.subheader("Category breakdown")
+                fig, ax = plt.subplots(figsize=(6, 4))
+                cb.head(12).plot(kind='pie', y=None, ax=ax, autopct='%1.1f%%', legend=False)
+                ax.set_ylabel("")
+                st.pyplot(fig)
+            with c2:
+                st.subheader("Top categories")
+                st.dataframe(data['top_categories'].rename_axis("Category").reset_index().rename(columns={'Category':'Category','top_categories':'Amount'}).head(10), use_container_width=True)
+
+        st.markdown("---")
+
+        # Daily spending pattern
+        st.subheader("Daily spending pattern")
+        daily_df = data['daily_spend']
+        if daily_df is None or daily_df.empty:
+            st.info("No daily spend data.")
+        else:
+            fig, ax = plt.subplots(figsize=(10, 3))
+            ax.bar(daily_df['Date'], daily_df['daily_spend'])
+            ax.set_ylabel("Amount (₹)")
+            ax.set_title("Daily spend")
+            st.pyplot(fig)
+
+        st.markdown("---")
+
+        # Income source split + Heatmap (side-by-side)
+        # s1, s2 = st.columns([1, 1])
+        # with s1:
+        st.subheader("Income sources")
+        inc_split = data['income_split']
+        if inc_split is None or inc_split.empty:
+            st.info("No income data for this period.")
+        else:
+            fig, ax = plt.subplots(figsize=(4, 3))
+            inc_split.plot(kind='pie', y=None, ax=ax, autopct='%1.1f%%', legend=False)
+            ax.set_ylabel("")
+            st.pyplot(fig)
+        # with s2:
+        #     st.subheader("Spending heatmap (day × hour)")
+        #     hm = data['heatmap']
+        #     if hm is None or hm.empty:
+        #         st.info("No heatmap data (missing created_at or little data).")
+        #     else:
+        #         fig, ax = plt.subplots(figsize=(10, 3))
+        #         im = ax.imshow(hm.values, aspect='auto')
+        #         ax.set_yticks(range(len(hm.index)))
+        #         ax.set_yticklabels(hm.index)
+        #         ax.set_xlabel("Hour")
+        #         fig.colorbar(im, ax=ax)
+        #         st.pyplot(fig)
+
+        st.markdown("---")
+
+        # Recurring & Anomalies
+        r1, r2 = st.columns(2)
+        with r1:
+            st.subheader("Recurring expenses (auto-detected)")
+            rec = data['recurring']
+            if rec is None or rec.empty:
+                st.info("No recurring expenses detected in this period.")
+            else:
+                st.dataframe(rec.head(50))
+        with r2:
+            st.subheader("Anomalies (outliers)")
+            anom = data['anomalies']
+            if anom is None or anom.empty:
+                st.info("No anomalies detected.")
+            else:
+                st.dataframe(anom[['Date','Amount','Description','Category','z']].sort_values('z', ascending=False).head(50))
+
+    # ---------------------
+    # TAB: Trends (multi-month)
+    # ---------------------
+    with tabs[1]:
+        st.subheader(f"Trends — Last {trend_months} months")
+        exp_tr = data['trend']['expense_trend']
+        inc_tr = data['trend']['income_trend']
+        cat_tr = data['trend']['category_trend']
+        port_tr = data['trend']['portfolio_trend']
+
+        # Expense vs Income line
+        if (exp_tr is None or exp_tr.empty) and (inc_tr is None or inc_tr.empty):
+            st.info("Not enough data for trend charts.")
+        else:
+            fig, ax = plt.subplots(figsize=(10, 3))
+            if not exp_tr.empty:
+                ax.plot(exp_tr.index.to_pydatetime(), exp_tr['total'].values, marker='o', label='Expenses')
+            if not inc_tr.empty:
+                ax.plot(inc_tr.index.to_pydatetime(), inc_tr['total'].values, marker='o', label='Income')
+            ax.set_title("Income vs Expense (monthly)")
+            ax.legend()
+            st.pyplot(fig)
+
+        st.markdown("---")
+
+        # Category trend area (stacked)
+        st.subheader("Category trend (area)")
+        if cat_tr is None or cat_tr.empty:
+            st.info("No category trend data.")
+        else:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            cat_tr.plot(kind='area', stacked=True, ax=ax)
+            ax.set_title("Category spend over time")
+            st.pyplot(fig)
+
+        st.markdown("---")
+
+        # Portfolio trend
+        st.subheader("Portfolio value trend")
+        if port_tr is None or port_tr.empty:
+            st.info("No portfolio trend data (historical snapshots required).")
+        else:
+            fig, ax = plt.subplots(figsize=(10, 3))
+            ax.plot(port_tr['Date'], port_tr['value'], marker='o')
+            ax.set_title("Portfolio Value")
+            st.pyplot(fig)
+
+    # ---------------------
+    # TAB: Accounts
+    # ---------------------
+    with tabs[2]:
+        st.subheader("Accounts — Snapshot")
+        accounts = data['accounts']
+        if accounts is None or accounts.empty:
+            st.info("No accounts configured.")
+        else:
+            st.dataframe(accounts[['id','name','balance','currency','kind']].sort_values(by='balance', ascending=False), use_container_width=True)
+            # account distribution pie
+            fig, ax = plt.subplots(figsize=(6,4))
+            try:
+                series = accounts.set_index('name')['balance']
+                series.plot(kind='pie', ax=ax, autopct='%1.1f%%')
+                ax.set_ylabel("")
+            except Exception:
+                ax.text(0.5, 0.5, 'No distribution data', ha='center')
+            st.pyplot(fig)
+
+    # ---------------------
+    # TAB: Investments
+    # ---------------------
+    with tabs[3]:
+        st.subheader("Investments")
+        inv = data['investments']
+        inv_summary = inv['summary']
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Principal", f"₹{inv_summary['total_principal']:.2f}")
+        c2.metric("Principal Remaining", f"₹{inv_summary['total_remaining']:.2f}")
+        c3.metric("Current Value", f"₹{inv_summary['current_value']:.2f}")
+
+        st.markdown("---")
+        st.subheader("Investment gain/loss")
+        gain_tbl = inv['gain_table']
+        if gain_tbl is None or gain_tbl.empty:
+            st.info("No gain/loss data available (current_value missing).")
+        else:
+            st.dataframe(gain_tbl.sort_values('gain', ascending=False).head(50), use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("Investment distribution")
+        inv_dist = inv['distribution']
+        if inv_dist is None or inv_dist.empty or inv_dist.sum() == 0:
+            st.info("No distribution data to display.")
+        else:
+            inv_dist = inv_dist.fillna(0)
+            fig, ax = plt.subplots(figsize=(6,4))
+            inv_dist.plot(kind='pie', ax=ax, autopct='%1.1f%%')
+            ax.set_ylabel("")
+            st.pyplot(fig)
+
+    # ---------------------
+    # TAB: Ledger & Insights
+    # ---------------------
+    with tabs[4]:
+        st.subheader("Ledger & Insights")
+        ledger = data['ledger']
+        st.write(ledger)
+
+        st.markdown("---")
+        st.subheader("Budget insights (auto)")
+        for insight in data['budget_insights']:
+            st.write("•", insight)
+
+        st.markdown("---")
+        st.subheader("Raw data quick links")
+        st.write("Expenses rows:", len(data['raw']['expenses']))
+        st.write("Income rows:", len(data['raw']['income']))
+        st.write("Budget rows:", len(data['raw']['budgets']))
+
 
 
 # ===========================================================
@@ -343,6 +664,78 @@ elif choice == "Edit Expense":
                             st.warning("⚠️ Expense not found or update failed.")
                     except Exception as ex:
                         st.error(f"Failed to update: {ex}")
+
+# ===========================================================
+# BUDGET MANAGEMENT
+# ===========================================================
+elif choice == "Budgets":
+    st.subheader("💰 Budget Management")
+
+    from app.finance import set_budget, get_budgets, delete_budget
+
+    budgets = get_budgets()
+
+    # ----------- Add Total Budget -----------
+    st.markdown("### 🟦 Total Monthly Budget")
+    with st.form("total_budget_form"):
+        total_amount = st.number_input("Set total monthly budget (₹)", min_value=0.0, format="%.2f")
+        submitted = st.form_submit_button("Save Total Budget")
+        if submitted:
+            try:
+                set_budget(category=None, amount=total_amount, period="monthly", active=True)
+                st.success("Total monthly budget saved.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    st.markdown("---")
+
+    # ----------- Category Budgets -----------
+    st.markdown("### 🟨 Category Budgets")
+
+    # Fetch category options dynamically
+    from app.tracker import get_category_options
+    categories = get_category_options()
+
+    with st.form("cat_budget_form"):
+        cat = st.selectbox("Select category", categories)
+        amt = st.number_input("Monthly budget amount (₹)", min_value=0.0, format="%.2f")
+        save_cat = st.form_submit_button("Save Category Budget")
+        if save_cat:
+            try:
+                set_budget(category=cat, amount=amt, period="monthly", active=True)
+                st.success(f"Budget saved for '{cat}'.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed: {e}")
+
+    st.markdown("---")
+
+    # ----------- List Existing Budgets -----------
+    st.markdown("### 📋 Existing Budgets")
+    if not budgets:
+        st.info("No budgets created yet.")
+    else:
+        import pandas as pd
+        df_b = pd.DataFrame(budgets)
+        st.dataframe(df_b[["id","category","amount","period","active","created_at"]], use_container_width=True)
+
+        # Delete section
+        del_id = st.number_input("Enter Budget ID to delete", min_value=0, step=1)
+        if st.button("Delete Budget"):
+            if del_id == 0:
+                st.warning("Enter a valid ID.")
+            else:
+                try:
+                    ok = delete_budget(int(del_id))
+                    if ok:
+                        st.success(f"Deleted budget ID {del_id}")
+                        st.rerun()
+                    else:
+                        st.error("Budget not found.")
+                except Exception as e:
+                    st.error(f"Error deleting: {e}")
+
 
 # ===========================================================
 # DELETE EXPENSE

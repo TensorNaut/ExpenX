@@ -223,6 +223,15 @@ def seed_default_accounts():
     finally:
         sess.close()
 
+class Budget(Base):
+    __tablename__ = 'budgets'
+    id = Column(Integer, primary_key=True, index=True)
+    category = Column(String(128), nullable=True, index=True)   # NULL => total monthly budget
+    amount = Column(Float, nullable=False)
+    period = Column(String(32), default='monthly')              # 'monthly' or 'yearly'
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+
 # # Optional: quick utility for schema inspection (helpful on GitHub READMEs/demos)
 # if __name__ == "__main__":
 #     print("Initializing DB and seeding default accounts (if missing)...")

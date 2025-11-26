@@ -2,7 +2,7 @@
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
-from app.db import get_session, Account, Income, Ledger, Expense, init_db
+from app.db import get_session, Account, Income, Ledger, Expense, Budget, init_db
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
@@ -345,3 +345,113 @@ def settle_credit_card(card_account_id: int, from_account_id: int, amount: float
     finally:
         sess.close()
 
+# -------------------------
+# Income read helpers
+# -------------------------
+def get_income(limit: int = 1000, offset: int = 0) -> list[dict]:
+    """
+    Return recent income records as a list of dicts:
+      id, account_id, date, amount, source, description, created_at
+    """
+    sess = get_session()
+    try:
+        rows = sess.query(Income).order_by(Income.date.desc(), Income.id.desc()).limit(limit).offset(offset).all()
+        out = []
+        for r in rows:
+            out.append({
+                'id': r.id,
+                'account_id': r.account_id,
+                'date': r.date.isoformat() if r.date else None,
+                'amount': float(r.amount) if r.amount is not None else 0.0,
+                'source': r.source,
+                'description': r.description,
+                'created_at': r.created_at.isoformat() if r.created_at else None
+            })
+        return out
+    finally:
+        sess.close()
+
+# -------------------------
+# Budget model helpers (CRUD)
+# -------------------------
+def set_budget(category: Optional[str], amount: float, period: str = 'monthly', active: bool = True) -> int:
+    """
+    Create or update a budget.
+    If a budget exists for the same category + period, update it (overwrite amount & active).
+    If category is None -> total budget for the period.
+    """
+    if amount <= 0:
+        raise ValueError("Budget amount must be positive")
+    period = period if period in ('monthly', 'yearly') else 'monthly'
+    sess = get_session()
+    try:
+        # find existing
+        q = sess.query(Budget).filter(func.coalesce(Budget.category, '') == (category or ''), Budget.period == period)
+        existing = q.first()
+        if existing:
+            existing.amount = float(amount)
+            existing.active = bool(active)
+            sess.commit()
+            return existing.id
+        b = Budget(category=category, amount=float(amount), period=period, active=bool(active))
+        sess.add(b)
+        sess.commit()
+        return b.id
+    except Exception:
+        sess.rollback()
+        raise
+    finally:
+        sess.close()
+
+def get_budgets(active_only: bool = False) -> list:
+    sess = get_session()
+    try:
+        q = sess.query(Budget).order_by(Budget.period, Budget.category.nullsfirst(), Budget.id.desc())
+        if active_only:
+            q = q.filter(Budget.active == True)
+        rows = q.all()
+        out = []
+        for r in rows:
+            out.append({
+                'id': r.id,
+                'category': r.category,
+                'amount': float(r.amount),
+                'period': r.period,
+                'active': bool(r.active),
+                'created_at': r.created_at.isoformat() if r.created_at else None
+            })
+        return out
+    finally:
+        sess.close()
+
+def get_budget_for_category(category: Optional[str], period: str = 'monthly'):
+    sess = get_session()
+    try:
+        r = sess.query(Budget).filter(func.coalesce(Budget.category, '') == (category or ''), Budget.period == period).first()
+        if not r:
+            return None
+        return {
+            'id': r.id,
+            'category': r.category,
+            'amount': float(r.amount),
+            'period': r.period,
+            'active': bool(r.active),
+            'created_at': r.created_at.isoformat() if r.created_at else None
+        }
+    finally:
+        sess.close()
+
+def delete_budget(budget_id: int) -> bool:
+    sess = get_session()
+    try:
+        b = sess.query(Budget).filter(Budget.id == budget_id).first()
+        if not b:
+            return False
+        sess.delete(b)
+        sess.commit()
+        return True
+    except Exception:
+        sess.rollback()
+        raise
+    finally:
+        sess.close()
