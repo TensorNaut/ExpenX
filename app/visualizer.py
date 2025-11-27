@@ -1,5 +1,4 @@
 """
-Function-based Visualizer Module for ExpenX (Complete)
 This module provides all data functions needed for the professional dashboard layout.
 
 - Data loaders: load_expenses_df, load_income_df, load_accounts_df, load_investments_df, load_budgets_df
