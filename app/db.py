@@ -20,6 +20,7 @@ from sqlalchemy import (
     ForeignKey, Index, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy import text
 
 # Config: DB path (env override supported)
 DB_PATH = os.getenv('EXPENX_DB', 'data/expenses.db')
@@ -177,11 +178,51 @@ Index('idx_investments_date', Investment.date)
 # -------------------------
 # Helpers
 # -------------------------
-def init_db():
+from app.schema_validator import validate_and_repair_schema
+
+def init_db(auto_repair_safe: bool = True):
     """
-    Create tables (if missing). Safe to call repeatedly.
+    Initialize DB (create missing tables), run schema validator,
+    and ensure default accounts exist.
     """
-    Base.metadata.create_all(bind=engine)
+    from sqlalchemy import text
+    from app.schema_validator import validate_and_repair_schema
+
+    # 1. Create tables if not exist
+    Base.metadata.create_all(bind=engine, checkfirst=True)
+
+    # 2. Create migrations table if missing
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS applied_migrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+        """))
+        conn.commit()
+
+    # 3. Schema Validator (Safe Mode)
+    try:
+        report = validate_and_repair_schema(engine, Base.metadata, auto_repair=auto_repair_safe)
+        print("\n🔍 Schema validator report:", report)
+    except Exception as e:
+        print("\n⚠ Schema validator error (ignored in Safe Mode):", e)
+
+    # 4. Ensure default accounts exist
+    with engine.connect() as conn:
+        res = conn.execute(text("SELECT COUNT(*) FROM accounts")).fetchone()
+        exists = res[0] if res else 0
+
+    if exists == 0:
+        print("⚙ Creating default system accounts...")
+        create_account("Main", balance=0.0, currency="INR", kind="bank")
+        create_account("Cash", balance=0.0, currency="INR", kind="cash")
+        create_account("Credit Card", balance=0.0, currency="INR", kind="card")
+        print("✔ Default accounts created.")
+
+
+
 
 def get_session():
     """

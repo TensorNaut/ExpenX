@@ -73,20 +73,23 @@ from app.visualizer import (
 
 from app.schema_validator import validate_and_repair_schema
 
-def init_db(auto_repair: bool = False):
-    # existing init code: create tables if missing
-    Base.metadata.create_all(bind=engine, checkfirst=True)
+# def init_db(auto_repair: bool = False):
+#     # existing init code: create tables if missing
+#     Base.metadata.create_all(bind=engine, checkfirst=True)
 
-    # new: validate schema & optionally auto-repair mismatches
-    try:
-        # pass engine and metadata to validator
-        report = validate_and_repair_schema(engine, Base.metadata, auto_repair=auto_repair)
-        # optionally log the report, or keep simple print
-        # logger.info(report)
-    except Exception as e:
-        # don't crash the entire app (but log it)
-        import logging
-        logging.getLogger("schema_validator").exception("Schema validation failed: %s", e)
+#     # new: validate schema & optionally auto-repair mismatches
+#     try:
+#         # pass engine and metadata to validator
+#         report = validate_and_repair_schema(engine, Base.metadata, auto_repair=auto_repair)
+#         # optionally log the report, or keep simple print
+#         # logger.info(report)
+#     except Exception as e:
+#         # don't crash the entire app (but log it)
+#         import logging
+#         logging.getLogger("schema_validator").exception("Schema validation failed: %s", e)
+
+from app.bootstrap import bootstrap
+bootstrap()
 
 # -----------------------------------------------------------
 # APP CONFIG
