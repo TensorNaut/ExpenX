@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from datetime import timedelta
 import numpy as np
+import kaleido
 
 
 from app.tracker import (
@@ -65,6 +66,18 @@ from app.visualizer import (
     compute_budget_status, generate_budget_insights,
     get_dashboard_data
 )
+
+from app.budget_repo import load_budgets
+
+from app.budget_engine import (
+    compute_budget, 
+    predict_overspend_per_category, category_stress_test, 
+    build_daily_category_heatmap, generate_budget_health_insights
+)
+
+from app.visual_reports import plot_monthly_stacked
+from app.report_generator import generate_overall_report
+
 
 
 # -----------------------------------------------------------
@@ -155,7 +168,8 @@ menu = [
     "Ledger",
     "Investments",
     "Budgets",
-    "Delete Expense"
+    "Delete Expense",
+    "Settings"
 ]
 choice = st.sidebar.selectbox("Menu", menu)
 
@@ -616,151 +630,303 @@ if choice == "📊 Analytics / Dashboard":
                 st.markdown(f"<div style='color:{color}'>• {sg}</div>", unsafe_allow_html=True)
 
 
-
-    # ----------------- BUDGET VISUALS -----------------
+        
+    # --------------------- BUDGET VISUALS ---------------------
     with tabs[1]:
-        st.subheader("📊 Budget Visuals (Burn Rate & Projections)")
+        st.header("📊 Budget Visuals")
 
-        expenses_df = data['raw'].get('expenses', pd.DataFrame())
-        budget = data.get('budgets', {})
+        # ---------------- Normalized Expense Frame ----------------
+        exp_raw = data['raw'].get('expenses', pd.DataFrame()).copy()
 
-        if expenses_df is None or (hasattr(expenses_df, "empty") and expenses_df.empty):
-            st.info("No expenses available for budget visualization.")
+        if exp_raw.empty:
+            st.info("No expenses recorded yet for visuals.")
+            st.stop()
+
+        exp_raw.columns = [c.lower() for c in exp_raw.columns]
+        exp_raw['date'] = pd.to_datetime(exp_raw['date'], errors='coerce')
+        exp_raw['amount'] = pd.to_numeric(exp_raw.get('amount', 0), errors='coerce').fillna(0)
+        exp_raw['category'] = exp_raw.get('category', 'Uncategorized').fillna('Uncategorized')
+        exp_raw = exp_raw[exp_raw['date'].notna()].drop_duplicates()
+
+        # ----------------- Determine Current Period ----------------
+        today = pd.Timestamp.today().normalize()
+        period_start = today.replace(day=1)
+        period_end = (period_start + pd.Timedelta(days=32)).replace(day=1) - pd.Timedelta(days=1)
+
+        exp_month = exp_raw[(exp_raw['date'] >= period_start) & (exp_raw['date'] <= period_end)].copy()
+
+        if exp_month.empty:
+            st.info("No expenses found for this month.")
+            st.stop()
+
+        # -------------------- Load Budgets -------------------------
+        from app.budget_repo import load_budgets
+        budgets_data = load_budgets()
+
+        total_budget = budgets_data.get("total_budget", 0)
+        total_spent = float(exp_month['amount'].sum())
+        remaining = total_budget - total_spent if total_budget else None
+        pct_used = (total_spent / total_budget * 100) if total_budget > 0 else 0
+
+        # -------------------- SUMMARIES ----------------------------
+        st.subheader("🔍 Budget Summary (This Month)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Budget", f"₹{total_budget:,.2f}")
+        c2.metric("Total Spent", f"₹{total_spent:,.2f}")
+        c3.metric("Remaining", f"₹{remaining:,.2f}" if remaining is not None else "No Budget")
+
+        # ------------------ BUDGET GAUGE --------------------------
+        st.subheader("🧭 Budget Adherence Gauge")
+
+        gauge_value = min(pct_used, 150)
+
+        gauge_fig = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=gauge_value,
+            title={"text": "Budget Used (%)"},
+            gauge={
+                "axis": {"range": [0, 150]},
+                "bar": {"color": "#ff4d4d" if pct_used > 100 else "#00e676"},
+                "steps": [
+                    {"range": [0, 80], "color": "#1f2a37"},
+                    {"range": [80, 100], "color": "#403d28"},
+                    {"range": [100, 150], "color": "#5a1f1f"}
+                ],
+                "threshold": {
+                    "line": {"color": "red", "width": 4},
+                    "value": 100
+                }
+            }
+        ))
+        gauge_fig.update_layout(paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG, height=280)
+        st.plotly_chart(gauge_fig, use_container_width=True)
+
+        if pct_used > 100:
+            st.error(f"⚠ Overspent by {pct_used - 100:.1f}% this month!")
+
+        st.markdown("---")
+
+        # ---------------- DAILY BURN RATE --------------------------
+        st.subheader("🔥 Daily Burn Rate")
+
+        daily = exp_month.groupby('date')['amount'].sum().reset_index()
+        daily['cumulative'] = daily['amount'].cumsum()
+
+        ideal_daily = total_spent / len(daily)
+        ideal_line = [ideal_daily * i for i in range(1, len(daily) + 1)]
+
+        fig1 = go.Figure()
+        fig1.add_trace(go.Scatter(x=daily['date'], y=daily['cumulative'],
+                                mode="lines+markers", name="Actual", line=dict(color="#ff7676")))
+        fig1.add_trace(go.Scatter(x=daily['date'], y=ideal_line,
+                                mode="lines", name="Ideal", line=dict(color="#36cfc9", dash="dot")))
+
+        fig1.update_layout(title="Cumulative Monthly Spend",
+                        xaxis_title="Date", yaxis_title="₹",
+                        template=PLOTLY_TEMPLATE,
+                        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG, height=320)
+        st.plotly_chart(fig1, use_container_width=True)
+
+        st.markdown("---")
+
+        # ---------------- MONTH END PROJECTION ---------------------
+        st.subheader("📅 Month-End Projection")
+
+        avg_daily = daily['amount'].mean()
+        days_in_month = period_end.day
+        projected_total = avg_daily * days_in_month
+
+        st.metric("Projected Spend", f"₹{projected_total:,.2f}")
+
+        proj_curve = [avg_daily * i for i in range(1, days_in_month + 1)]
+
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=list(range(1, len(daily)+1)),
+                                y=daily['cumulative'],
+                                name="Actual", line=dict(color="#ff7676")))
+        fig2.add_trace(go.Scatter(x=list(range(1, days_in_month+1)),
+                                y=proj_curve,
+                                name="Projected", line=dict(color="#36cfc9", dash="dot")))
+
+        fig2.update_layout(title="Projected Month-End Spend Curve",
+                        xaxis_title="Day", yaxis_title="₹",
+                        template=PLOTLY_TEMPLATE,
+                        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG, height=320)
+        st.plotly_chart(fig2, use_container_width=True)
+
+        st.markdown("---")
+
+        # ---------------- CATEGORY SPENT VS BUDGET ------------------
+        st.subheader("🧮 Category vs Budget")
+
+        cat_spend = exp_month.groupby("category")["amount"].sum().reset_index()
+        cat_spend.columns = ["category", "spent"]
+
+        cat_budget_df = pd.DataFrame(budgets_data.get("categories", []))
+        if not cat_budget_df.empty:
+            cat_merge = pd.merge(cat_spend, cat_budget_df, on="category", how="left")
         else:
-            # Prepare date
-            expenses_df["Date"] = pd.to_datetime(expenses_df["Date"])
-            expenses_df.sort_values("Date", inplace=True)
+            cat_merge = cat_spend.copy()
+            cat_merge['amount'] = 0
 
-            # ----------------------------------------------------
-            # 1. DAILY BURN RATE CURVE
-            # ----------------------------------------------------
-            st.markdown("### 🔥 Daily Burn Rate")
+        cat_merge['budget'] = cat_merge['amount'].fillna(0)
+        cat_merge['remaining'] = cat_merge['budget'] - cat_merge['spent']
 
-            daily = expenses_df.groupby("Date")["Amount"].sum().reset_index()
-            daily["Cumulative"] = daily["Amount"].cumsum()
+        fig3 = px.bar(cat_merge, x="category", y=["spent", "budget"],
+                    barmode="group", template=PLOTLY_TEMPLATE,
+                    title="Spent vs Budget by Category")
+        fig3.update_layout(paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG, height=380)
+        st.plotly_chart(fig3, use_container_width=True)
 
-            ideal_daily = daily["Cumulative"].iloc[-1] / len(daily)
-            ideal_line = [ideal_daily * i for i in range(1, len(daily) + 1)]
+        st.markdown("---")
 
-            fig1 = go.Figure()
-            fig1.add_trace(go.Scatter(
-                x=daily["Date"], y=daily["Cumulative"],
-                mode="lines+markers", name="Actual Spending", line=dict(color="#ff7b6b")
-            ))
-            fig1.add_trace(go.Scatter(
-                x=daily["Date"], y=ideal_line,
-                mode="lines", name="Ideal Pacing", line=dict(color="#2dd4bf", dash="dot")
-            ))
-            fig1.update_layout(
-                title="Burn Rate Curve",
-                xaxis_title="Date",
-                yaxis_title="Cumulative Spend (₹)",
-                template=PLOTLY_TEMPLATE,
-                paper_bgcolor=DARK_BG,
-                plot_bgcolor=DARK_BG,
-                height=380
-            )
-            st.plotly_chart(fig1, use_container_width=True)
+        # ---------------- CATEGORY ALLOCATION DONUT -----------------
+        st.subheader("🍩 Category Budget Allocation")
 
-            st.markdown("---")
+        if cat_budget_df.empty or cat_budget_df['amount'].sum() == 0:
+            st.info("No category budgets set yet.")
+        else:
+            fig4 = px.pie(cat_budget_df, names="category", values="amount",
+                        hole=0.55, template=PLOTLY_TEMPLATE,
+                        title="Distribution of Category Budgets")
+            fig4.update_layout(paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG, height=380)
+            st.plotly_chart(fig4, use_container_width=True)
 
-            # ----------------------------------------------------
-            # 2. MONTH-END PROJECTION
-            # ----------------------------------------------------
-            st.markdown("### 📅 Projected Month-End Spending")
+        st.markdown("---")
 
-            today = daily["Date"].max()
-            start_month = today.replace(day=1)
-            days_passed = (today - start_month).days + 1
-            total_days_month = 30  # approx
+        # ---------------- OVESPEND PREDICTOR ------------------------
+        from app.budget_engine import predict_overspend_per_category
+        predictor = predict_overspend_per_category(exp_month, budgets_data, period_start, period_end)
 
-            avg_daily_spend = daily["Amount"].mean()
-            projected_spending = avg_daily_spend * total_days_month
+        st.subheader("🔮 Overspend Predictor")
 
-            st.metric("Projected Month-End Spend", f"₹{projected_spending:.2f}")
+        pred_rows = []
+        for cat, r in predictor.items():
+            pred_rows.append({
+                "Category": cat,
+                "Spent": r["spent"],
+                "Budget": r["budget"],
+                "Projected": r["projected_total"],
+                "Will Exceed": r["will_exceed"],
+                "Days to Exceed": r["days_to_exceed"]
+            })
 
-            proj_line = [avg_daily_spend * i for i in range(1, total_days_month + 1)]
-            real_days = range(1, days_passed + 1)
+        pred_df = pd.DataFrame(pred_rows).sort_values("Will Exceed", ascending=False)
+        st.dataframe(pred_df, use_container_width=True)
 
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(
-                x=list(real_days),
-                y=daily["Cumulative"],
-                name="Actual",
-                line=dict(color="#ff7b6b")
-            ))
-            fig2.add_trace(go.Scatter(
-                x=list(range(1, total_days_month + 1)),
-                y=proj_line,
-                name="Projected",
-                line=dict(color="#2dd4bf", dash="dot")
-            ))
-            fig2.update_layout(
-                title="Month-End Projection",
-                xaxis_title="Day of Month",
-                yaxis_title="Amount (₹)",
-                template=PLOTLY_TEMPLATE,
-                paper_bgcolor=DARK_BG,
-                plot_bgcolor=DARK_BG,
-                height=380
-            )
-            st.plotly_chart(fig2, use_container_width=True)
+        st.markdown("---")
 
-            st.markdown("---")
+        # ---------------- Multi-month Trend----------------
+        st.markdown("## 📈 Multi-month Trends & Report")
 
-            # ----------------------------------------------------
-            # 3. BUDGET vs ACTUAL LINE CHART
-            # ----------------------------------------------------
-            st.markdown("### 📈 Budget vs Actual Spend (This Month)")
+        months_option = st.selectbox("Select months to view", [3, 6, 9, 12], index=1)
+        from app.visual_reports import build_multi_month_agg, plot_multi_month_total, plot_top_categories_trend, generate_monthly_report_pdf
 
-            if budget and budget.get("total_budget") is not None:
-                total_budget = budget["total_budget"]
+        months_list, totals_df, cat_month_df = build_multi_month_agg(exp_raw, months=months_option)
 
-                ideal_line2 = np.linspace(0, total_budget, len(daily))
+        # show totals line
+        fig_tot = plot_multi_month_total(totals_df)
+        st.plotly_chart(fig_tot, use_container_width=True)
 
-                fig3 = go.Figure()
-                fig3.add_trace(go.Scatter(
-                    x=daily["Date"], y=daily["Cumulative"],
-                    name="Actual Spend", line=dict(color="#ff7b6b")
-                ))
-                fig3.add_trace(go.Scatter(
-                    x=daily["Date"], y=ideal_line2,
-                    name="Ideal Budget Usage", line=dict(color="#2dd4bf", dash="dot")
-                ))
-                fig3.update_layout(
-                    title="Budget vs Actual Spending",
-                    xaxis_title="Date",
-                    yaxis_title="₹",
-                    template=PLOTLY_TEMPLATE,
-                    paper_bgcolor=DARK_BG,
-                    plot_bgcolor=DARK_BG,
-                    height=380
-                )
-                st.plotly_chart(fig3, use_container_width=True)
+        # top categories trend
+        fig_top = plot_top_categories_trend(cat_month_df, top_n=6)
+        st.plotly_chart(fig_top, use_container_width=True)
+
+        # stacked
+        fig_stack = plot_monthly_stacked(cat_month_df)
+        st.plotly_chart(fig_stack, use_container_width=True)
+
+        st.markdown("---")
+
+        # # Downloadable PDF
+        # if st.button("Generate PDF Report"):
+        #     with st.spinner("Generating PDF..."):
+        #         pdf_bytes = generate_monthly_report_pdf(exp_raw, budgets_data, months=months_option)
+        #         st.success("Report ready — click to download")
+        #         st.download_button(
+        #             label="Download PDF",
+        #             data=pdf_bytes,
+        #             file_name=f"expenx_report_{months_option}m_{pd.Timestamp.now().strftime('%Y%m%d')}.pdf",
+        #             mime="application/pdf"
+        #         )
+        #     st.markdown("---")
+
+        # ---------------- STRESS TEST SIMULATOR ---------------------
+        # from app.budget_engine import category_stress_test
+
+        # st.subheader("🧪 Stress Test Simulator")
+
+        # cat_list = sorted(cat_merge['category'].unique())
+        # sc1, sc2, sc3 = st.columns([3,3,2])
+
+        # sim_cat = sc1.selectbox("Category", ["All"] + cat_list)
+        # sim_pct = sc2.slider("Change (%)", -100, 300, 0, 5)
+
+        # if sc3.button("Run Simulation"):
+        #     sim_map = {}
+        #     if sim_cat == "All":
+        #         for c in cat_list:
+        #             sim_map[c] = sim_pct / 100
+        #     else:
+        #         sim_map[sim_cat] = sim_pct / 100
+
+        #     sim_result = category_stress_test(exp_month, budgets_data, sim_map)
+
+        #     st.write(f"**Projected Total:** ₹{sim_result['total_projected']:,.2f}")
+        #     if sim_result['overall_delta'] > 0:
+        #         st.error(f"Over Budget by ₹{sim_result['overall_delta']:,.2f}")
+        #     else:
+        #         st.success(f"Within Budget by ₹{-sim_result['overall_delta']:,.2f}")
+
+        #     sim_df = pd.DataFrame([
+        #         {
+        #             "Category": c,
+        #             "Budget": v['budget'],
+        #             "Projected": v['projected'],
+        #             "Delta": v['delta_over_budget']
+        #         } for c, v in sim_result['per_category'].items()
+        #     ]).sort_values("Delta", ascending=False)
+
+        #     st.dataframe(sim_df, use_container_width=True)
+
+        # st.markdown("---")
+
+        # ---------------- HEATMAP ---------------------
+        from app.budget_engine import build_daily_category_heatmap
+        st.subheader("🔥 Daily Category Heatmap")
+
+        heat = build_daily_category_heatmap(exp_month)
+
+        if heat.empty:
+            st.info("Not enough data to build heatmap.")
+        else:
+            heat['total'] = heat.sum(axis=1)
+            heat = heat.sort_values('total', ascending=False)
+            heat = heat.drop(columns=['total'])
+
+            fig_h = px.imshow(heat.values,
+                            labels={"x": "Day", "y": "Category", "color": "Amount"},
+                            x=list(heat.columns),
+                            y=list(heat.index),
+                            aspect="auto",
+                            color_continuous_scale="YlOrRd")
+            fig_h.update_layout(paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG, height=380)
+            st.plotly_chart(fig_h, use_container_width=True)
+
+        st.markdown("---")
+
+        # ---------------- HEALTH INSIGHTS -----------------
+        from app.budget_engine import generate_budget_health_insights
+        st.subheader("🩺 Budget Health Insights")
+
+        insights = generate_budget_health_insights(predictor)
+        for insight in insights:
+            if insight.startswith("🔴"):
+                st.error(insight)
+            elif insight.startswith("🟡"):
+                st.warning(insight)
             else:
-                st.info("Set a total budget to view this comparison.")
-
-            st.markdown("---")
-
-            # ----------------------------------------------------
-            # 4. CATEGORY SPENDING PROJECTION
-            # ----------------------------------------------------
-            st.markdown("### 🗂 Category Projection (Remaining Month)")
-
-            cat_df = expenses_df.groupby("Category")["Amount"].sum().reset_index()
-
-            if cat_df.empty:
-                st.info("Not enough data for category projections.")
-            else:
-                fig4 = px.bar(
-                    cat_df,
-                    x="Category",
-                    y="Amount",
-                    text_auto=True,
-                    template=PLOTLY_TEMPLATE,
-                    title="Category Spend So Far (Projection Based on Averages)"
-                )
-                st.plotly_chart(fig4, use_container_width=True)
+                st.info(insight)
         st.markdown("---")
 
     # ----------------- TRENDS -----------------
@@ -928,6 +1094,33 @@ if choice == "📊 Analytics / Dashboard":
             download_df(exp_df.reset_index(drop=True) if exp_df is not None else pd.DataFrame(), "expenses_full")
             download_df(inc_df.reset_index(drop=True) if inc_df is not None else pd.DataFrame(), "income_full")
             download_df(bud_df.reset_index(drop=True) if bud_df is not None else pd.DataFrame(), "budgets_full")
+
+
+        col1, col2 = st.columns(2)
+        with col1:
+            rep_type = st.selectbox("Report type", ["Monthly", "Yearly"])
+        with col2:
+            if rep_type == "Monthly":
+                sel_date = st.date_input("Select month", value=pd.Timestamp.today().to_pydatetime())
+                sel_year = sel_date.year
+                sel_month = sel_date.month
+            else:
+                sel_year = st.selectbox("Year", list(range(2020, datetime.now().year+1)), index=len(list(range(2020, datetime.now().year+1)))-1)
+                sel_month = None
+
+        if st.button("Generate Report"):
+            try:
+                if rep_type == "Monthly":
+                    pdf_bytes = generate_overall_report(sel_year, sel_month, period='monthly')
+                    filename = f"expenx_monthly_{sel_year}_{sel_month}.pdf"
+                else:
+                    pdf_bytes = generate_overall_report(sel_year, None, period='yearly')
+                    filename = f"expenx_yearly_{sel_year}.pdf"
+                st.success("Report generated")
+                st.download_button("Download PDF", pdf_bytes, file_name=filename, mime="application/pdf")
+            except Exception as e:
+                st.error(f"Failed to generate report: {e}")
+
 
 # End of block
 
@@ -1118,48 +1311,38 @@ elif choice == "Edit Expense":
 # ===========================================================
 elif choice == "Budgets":
 
-    from app.budget_repo import (
-        load_budget_df,
-        save_total_budget,
-        save_category_budget
-    )
-    from app.budget_engine import compute_budget, generate_budget_insights
+    from app.budget_repo import load_budget_df, save_total_budget, save_category_budget
+    from app.settings import get_setting
 
-    st.subheader("📊 Budget Management")
+    st.header("📊 Budget Management")
 
-    # -----------------------------------------------------------
-    # Load Data
-    # -----------------------------------------------------------
+    # Load expenses + budgets
     expenses_df = get_expenses()
     budgets_df = load_budget_df()
 
-    # -----------------------------------------------------------
-    # Period Range (This Month)
-    # -----------------------------------------------------------
+    # Monthly period
     today = dt_date.today()
     period_start = dt_date(today.year, today.month, 1)
     next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=1)
     period_end = next_month - timedelta(days=1)
 
-    # Compute budget state
+    # Compute budget once
     status = compute_budget(expenses_df, budgets_df, period_start, period_end)
 
-    # -----------------------------------------------------------
-    # SUMMARY TABLE AT TOP
-    # -----------------------------------------------------------
-    st.markdown("### 🔍 Budget Overview (This Month)")
+    # Settings-based slider max
+    total_slider_max = int(get_setting("default_total_budget_max", "100000"))
+    cat_slider_max = int(get_setting("default_category_budget_max", "20000"))
+
+    # ----------------- Summary Table -------------------
+    st.subheader("🔍 Budget Overview (This Month)")
 
     summary_rows = []
-
     summary_rows.append({
         "Category": "TOTAL",
         "Budget": status["total_budget"] or 0,
         "Spent": status["total_spent"],
         "Remaining": status["total_remaining"] or 0,
-        "Used %": (
-            (status["total_spent"] / status["total_budget"] * 100)
-            if status["total_budget"] else 0
-        )
+        "Used %": (status["total_spent"] / status["total_budget"] * 100) if status["total_budget"] else 0
     })
 
     for cat, info in status["per_category"].items():
@@ -1172,55 +1355,73 @@ elif choice == "Budgets":
         })
 
     summary_df = pd.DataFrame(summary_rows)
-    st.dataframe(summary_df, use_container_width=True, height=300)
+    summary_df = summary_df.sort_values(by="Spent", ascending=False).reset_index(drop=True)
+
+    st.dataframe(summary_df, use_container_width=True, height=260)
+
+    # -------------- Health Dot Function ---------------
+    def health_dot(pct):
+        if pct >= 100:
+            color = "#ff4d4f"  # red
+        elif pct >= 80:
+            color = "#faad14"  # orange
+        else:
+            color = "#52c41a"  # green
+        return f"<span style='font-size:20px;color:{color}'>●</span>"
 
     st.markdown("---")
 
-    # -----------------------------------------------------------
-    # TOTAL BUDGET SLIDER
-    # -----------------------------------------------------------
-    st.markdown("## 💰 Total Monthly Budget")
+    # ----------------- TOTAL Budget Row ------------------
+    st.subheader("💰 Total Monthly Budget")
 
     total_budget = status["total_budget"] or 0
     total_spent = status["total_spent"]
-    total_remaining = status["total_remaining"] if status["total_remaining"] is not None else 0
+    total_remaining = status["total_remaining"] or 0
 
-    # FIXED MAX = 1,00,000
-    new_total_budget = st.slider(
+    # session_state for auto-save
+    if "last_total_budget" not in st.session_state:
+        st.session_state.last_total_budget = total_budget
+
+    cols = st.columns([2, 6, 2, 2, 1])
+
+    cols[0].markdown("**TOTAL**")
+
+    new_total = cols[1].slider(
         "Set Monthly Budget",
         min_value=0,
-        max_value=100000,
+        max_value=total_slider_max,
         value=int(total_budget),
-        step=500
+        step=500,
+        key="total_budget_slider"
     )
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Spent", f"₹{total_spent:.2f}")
-    col2.metric("Remaining", f"₹{total_remaining:.2f}")
-    pct_used = (total_spent / new_total_budget * 100) if new_total_budget > 0 else 0
-    col3.metric("Used", f"{pct_used:.1f}%")
+    # Full-width HTML numbers (no truncation)
+    cols[2].markdown(
+        f"<div style='font-size:22px; font-weight:600;'>₹{total_spent:.2f}</div>",
+        unsafe_allow_html=True
+    )
+    cols[3].markdown(
+        f"<div style='font-size:22px; font-weight:600;'>₹{total_remaining:.2f}</div>",
+        unsafe_allow_html=True
+    )
 
-    days_left = (period_end - today).days
-    pace = max(new_total_budget - total_spent, 0) / max(days_left, 1)
-    col4.metric("Daily Pace", f"₹{pace:.0f}/day")
+    total_pct = (total_spent / new_total * 100) if new_total > 0 else 0
+    cols[4].markdown(health_dot(total_pct), unsafe_allow_html=True)
 
-    if st.button("Save Total Budget"):
-        save_total_budget(new_total_budget)
-        st.success("Total budget updated ✔")
-        st.rerun()
+    # Auto-save (NO BUTTON)
+    if new_total != st.session_state.last_total_budget:
+        save_total_budget(new_total)
+        st.session_state.last_total_budget = new_total
+        st.toast("Total budget saved ✔", icon="💾")
 
     st.markdown("---")
 
-    # -----------------------------------------------------------
-    # CATEGORY BUDGET SLIDERS (Scrollable)
-    # -----------------------------------------------------------
-    st.markdown("## 📂 Category-wise Budgets")
+    # ---------------- CATEGORY Budget Rows ------------------
+    st.subheader("📂 Category Budgets")
 
     categories = sorted(expenses_df["Category"].unique())
 
     for cat in categories:
-        st.markdown(f"### {cat}")
-
         info = status["per_category"].get(cat, {
             "budget": 0,
             "spent": 0,
@@ -1229,51 +1430,59 @@ elif choice == "Budgets":
         })
 
         spent_cat = info["spent"]
-        budget_cat = info["budget"]
+        budget_cat = info["budget"] or 0
 
-        # FIXED MAX = 20,000
-        new_budget_cat = st.slider(
-            f"Budget for {cat}",
+        state_key = f"last_cat_budget_{cat}"
+        if state_key not in st.session_state:
+            st.session_state[state_key] = budget_cat
+
+        rcols = st.columns([3, 6, 2, 2, 1])
+
+        rcols[0].markdown(f"**{cat}**")
+
+        new_cat_budget = rcols[1].slider(
+            "",
             min_value=0,
-            max_value=20000,
+            max_value=cat_slider_max,
             value=int(budget_cat),
             step=100,
-            key=f"slider_{cat}"
+            key=f"cat_slider_{cat}"
         )
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Spent", f"₹{spent_cat:.2f}")
-        rem_cat = new_budget_cat - spent_cat
-        c2.metric("Remaining", f"₹{rem_cat:.2f}")
-        used_pct = (spent_cat / new_budget_cat * 100) if new_budget_cat > 0 else 0
-        c3.metric("Used", f"{used_pct:.1f}%")
-        pace_cat = max(new_budget_cat - spent_cat, 0) / max(days_left, 1)
-        c4.metric("Daily Pace", f"₹{pace_cat:.0f}/day")
+        rcols[2].markdown(
+            f"<div style='font-size:20px; font-weight:500;'>₹{spent_cat:.2f}</div>",
+            unsafe_allow_html=True
+        )
+        rcols[3].markdown(
+            f"<div style='font-size:20px; font-weight:500;'>₹{(new_cat_budget - spent_cat):.2f}</div>",
+            unsafe_allow_html=True
+        )
 
-        if st.button(f"Save {cat} Budget", key=f"save_{cat}"):
-            save_category_budget(cat, new_budget_cat)
-            st.success(f"Budget updated for {cat} ✔")
-            st.rerun()
+        pct_used = (spent_cat / new_cat_budget * 100) if new_cat_budget > 0 else 0
+        rcols[4].markdown(health_dot(pct_used), unsafe_allow_html=True)
 
-        st.markdown("---")
+        # Auto-save (NO BUTTON)
+        if new_cat_budget != st.session_state[state_key]:
+            save_category_budget(cat, int(new_cat_budget))
+            st.session_state[state_key] = new_cat_budget
+            st.toast(f"{cat} budget saved ✔", icon="💾")
 
-    # -----------------------------------------------------------
-    # INSIGHTS
-    # -----------------------------------------------------------
-    st.markdown("## 💡 Budget Insights")
+    st.markdown("---")
+
+    # ---------------- INSIGHTS SECTION -------------------
+    st.subheader("💡 Insights")
     insights = generate_budget_insights(status)
 
     if not insights:
-        st.success("Everything looks good! You're within healthy limits.")
+        st.success("Everything looks good. You're on track!")
     else:
-        for text in insights:
-            if "🔥" in text or "exceed" in text.lower():
-                st.error(text)
-            elif "⚠" in text:
-                st.warning(text)
+        for i in insights:
+            if "⚠" in i:
+                st.warning(i)
+            elif "🔥" in i or "over" in i.lower():
+                st.error(i)
             else:
-                st.info(text)
-
+                st.info(i)
 
 
 # ===========================================================
@@ -1812,4 +2021,86 @@ elif choice == "Investments":
                     df = pd.DataFrame(settlements)
                     st.dataframe(df, use_container_width=True)
 
+    st.markdown("---")
+
+# ===========================================================
+# SETTINGS
+# ===========================================================
+
+elif choice == "Settings":
+    from app.settings import get_setting, set_setting, get_all_settings, reset_to_defaults
+
+    st.title("⚙ ExpenX Settings")
+
+    st.markdown("### Budget defaults")
+    # read stored values (strings), convert to ints
+    total_max = int(get_setting("default_total_budget_max", "100000"))
+    cat_max = int(get_setting("default_category_budget_max", "20000"))
+
+    new_total = st.number_input("Default total budget slider max (₹)", min_value=1000, max_value=2000000, value=total_max, step=1000)
+    new_cat = st.number_input("Default category budget slider max (₹)", min_value=100, max_value=1000000, value=cat_max, step=100)
+
+    if st.button("Save budget settings"):
+        set_setting("default_total_budget_max", str(int(new_total)))
+        set_setting("default_category_budget_max", str(int(new_cat)))
+        st.success("Budget settings saved.")
+
+    st.markdown("---")
+    st.markdown("### General Settings")
+    curr = get_setting("currency", "INR")
+    date_fmt = get_setting("date_format", "%Y-%m-%d")
+    auto_backup = get_setting("enable_auto_backup", "true") == "true"
+
+    new_curr = st.text_input("Currency (symbol/ISO)", value=curr)
+    new_date = st.text_input("Date format (python)", value=date_fmt)
+    new_backup = st.checkbox("Enable automatic DB backups", value=auto_backup)
+
+    if st.button("Save general settings"):
+        set_setting("currency", new_curr)
+        set_setting("date_format", new_date)
+        set_setting("enable_auto_backup", "true" if new_backup else "false")
+        st.success("General settings saved.")
+
+    st.markdown("---")
+    if st.button("Reset settings to defaults"):
+        reset_to_defaults()
+        st.success("Settings reset to defaults. Refresh the page.")
+
+    st.markdown("### Danger Zone")
+    st.warning("Actions below cannot be undone. ExpenX will back up DB automatically.")
+
+    if st.button("Reset ALL Data (Full DB Reset)"):
+        import shutil, time
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        shutil.copy2("data/expenses.db", f"data/db_backups/expenses.db.fullreset.{ts}.bak")
+        open("data/expenses.db", "w").close()  # wipe file
+        st.success("Database reset. Restart app.")
+        st.stop()
+
+    if st.button("Reset ONLY Expense Data"):
+        from app.db import engine
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("DELETE FROM expenses"))
+            conn.commit()
+        st.success("Expense table cleared.")
+
+    if st.button("Reset ONLY Ledger Data"):
+        from app.db import engine
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("DELETE FROM ledger"))
+            conn.execute(text("DELETE FROM ledger_persons"))
+            conn.commit()
+        st.success("Ledger tables cleared.")
+
+    if st.button("Reset ONLY Investments Data"):
+        from app.db import engine
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("DELETE FROM investments"))
+            conn.execute(text("DELETE FROM investment_settlements"))
+            conn.execute(text("DELETE FROM investment_snapshots"))
+            conn.commit()
+        st.success("Investment tables cleared.")
     st.markdown("---")

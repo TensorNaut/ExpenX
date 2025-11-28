@@ -1,70 +1,82 @@
-# app/budget_engine.py
+# -----------------------------------------------------------
+#  ExpenX - Budget Engine (Final Polished Version)
+# -----------------------------------------------------------
 
 import pandas as pd
-from datetime import date
+import numpy as np
+from datetime import datetime, date, timedelta
 
 
-def compute_budget(expenses_df, budgets_df, start_date: date, end_date: date):
+# -----------------------------------------------------------
+#   CORE BUDGET COMPUTATION
+# -----------------------------------------------------------
+
+def compute_budget(exp_df: pd.DataFrame, budgets_df: pd.DataFrame,
+                   period_start: date, period_end: date):
     """
-    Pure budget computation — returns a clean object:
-    {
-        total_budget,
-        total_spent,
-        total_remaining,
-        per_category: {
-            cat: {budget, spent, remaining, pct_used}
+    Compute full budget status for the given period.
+    Returns dictionary containing:
+        - total_budget
+        - total_spent
+        - total_remaining
+        - per_category: {category: {...}}
+    """
+    if exp_df is None or exp_df.empty:
+        return {
+            "total_budget": 0,
+            "total_spent": 0,
+            "total_remaining": 0,
+            "per_category": {}
         }
-    }
-    """
 
-    # Ensure date column is datetime
-    expenses_df["Date"] = pd.to_datetime(expenses_df["Date"]).dt.date
+    df = exp_df.copy()
+    df.columns = [c.lower() for c in df.columns]
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
+    df['category'] = df.get('category', 'Uncategorized').fillna('Uncategorized')
 
-    # Filter expenses within period
-    df_period = expenses_df[
-        (expenses_df["Date"] >= start_date) &
-        (expenses_df["Date"] <= end_date)
-    ]
+    # Filter period
+    mask = (df['date'] >= pd.Timestamp(period_start)) & (df['date'] <= pd.Timestamp(period_end))
+    df = df.loc[mask]
 
-    # Total spent
-    total_spent = df_period["Amount"].sum()
+    # Load budget frames
+    budgets_df.columns = [c.lower() for c in budgets_df.columns]
 
-    # ----- Total Budget -----
-    tb = budgets_df[
-        budgets_df["category"].isna() &
-        (budgets_df["period"] == "monthly") &
-        (budgets_df["active"] == True)
-    ]
+    total_budget_row = budgets_df[budgets_df['category'].isna()]
+    total_budget = float(total_budget_row['amount'].iloc[0]) if not total_budget_row.empty else 0
 
-    total_budget = float(tb["amount"].iloc[0]) if not tb.empty else None
-    total_remaining = (
-        total_budget - total_spent
-        if total_budget is not None
-        else None
-    )
+    cat_budget_rows = budgets_df[budgets_df['category'].notna()]
 
-    # ----- Category Budgets -----
+    # Compute totals
+    total_spent = float(df['amount'].sum())
+    total_remaining = total_budget - total_spent if total_budget else None
+
+    # category-wise
+    per_category_spend = df.groupby('category')['amount'].sum().to_dict()
     per_category = {}
-    cat_rows = budgets_df[
-        budgets_df["category"].notna() &
-        (budgets_df["period"] == "monthly") &
-        (budgets_df["active"] == True)
-    ]
 
-    for _, row in cat_rows.iterrows():
-        cat = row["category"]
-        budget_amt = row["amount"]
-
-        spent_cat = df_period[df_period["Category"] == cat]["Amount"].sum()
-        remaining = budget_amt - spent_cat
-        pct_used = (spent_cat / budget_amt * 100) if budget_amt > 0 else 0
-
+    for cat, spent in per_category_spend.items():
+        bud_row = cat_budget_rows[cat_budget_rows['category'] == cat]
+        bud_amt = float(bud_row['amount'].iloc[0]) if not bud_row.empty else 0
+        remaining = bud_amt - spent
+        pct_used = (spent / bud_amt * 100) if bud_amt > 0 else 0
         per_category[cat] = {
-            "budget": budget_amt,
-            "spent": spent_cat,
+            "budget": bud_amt,
+            "spent": spent,
             "remaining": remaining,
             "pct_used": pct_used
         }
+
+    # categories that have budgets but no spending yet
+    for _, r in cat_budget_rows.iterrows():
+        cat = r['category']
+        if cat not in per_category:
+            per_category[cat] = {
+                "budget": float(r['amount']),
+                "spent": 0.0,
+                "remaining": float(r['amount']),
+                "pct_used": 0.0
+            }
 
     return {
         "total_budget": total_budget,
@@ -74,34 +86,184 @@ def compute_budget(expenses_df, budgets_df, start_date: date, end_date: date):
     }
 
 
-def generate_budget_insights(status):
+# -----------------------------------------------------------
+#   1. OVESPEND PREDICTOR PER CATEGORY
+# -----------------------------------------------------------
+
+def predict_overspend_per_category(exp_month: pd.DataFrame, budgets: dict,
+                                   period_start: pd.Timestamp, period_end: pd.Timestamp):
     """
-    Generate human-readable insights based on status output from compute_budget.
+    Predict if category will exceed its budget based on average pace.
+    Returns: {category: {...}}
+    """
+    if exp_month is None or exp_month.empty:
+        return {}
+
+    today = pd.Timestamp.today().normalize()
+    days_passed = (today - period_start).days + 1
+    days_total = (period_end - period_start).days + 1
+    days_remaining = max(days_total - days_passed, 0)
+
+    # Build budget lookup
+    budget_map = {c['category']: float(c['amount']) for c in budgets.get("categories", [])}
+
+    # Category spending so far
+    grp = exp_month.groupby('category')['amount'].sum().to_dict()
+    results = {}
+
+    for cat, spent in grp.items():
+        budget = budget_map.get(cat, 0.0)
+        avg_daily = spent / max(days_passed, 1)
+        proj_total = spent + avg_daily * days_remaining
+
+        will_exceed = (budget > 0 and proj_total > budget)
+        days_to_exceed = None
+
+        if will_exceed and avg_daily > 0:
+            d = (budget - spent) / avg_daily
+            days_to_exceed = max(0.0, d)
+
+        results[cat] = {
+            "spent": float(spent),
+            "budget": float(budget),
+            "avg_daily": float(avg_daily),
+            "projected_total": float(proj_total),
+            "will_exceed": bool(will_exceed),
+            "days_to_exceed": days_to_exceed
+        }
+
+    # Include categories with budget but no spend
+    for entry in budgets.get("categories", []):
+        cat = entry["category"]
+        if cat not in results:
+            results[cat] = {
+                "spent": 0.0,
+                "budget": float(entry["amount"]),
+                "avg_daily": 0.0,
+                "projected_total": 0.0,
+                "will_exceed": False,
+                "days_to_exceed": None
+            }
+
+    return results
+
+
+# -----------------------------------------------------------
+#   2. CATEGORY STRESS TEST SIMULATOR
+# -----------------------------------------------------------
+
+def category_stress_test(exp_month: pd.DataFrame, budgets: dict, simulate_changes: dict):
+    """
+    Simulate category-level changes (e.g. +20% on Food).
+    simulate_changes example: {"Food": 0.25} for +25%.
+    """
+    grouped = exp_month.groupby("category")["amount"].sum().to_dict()
+    budget_map = {c['category']: float(c['amount']) for c in budgets.get("categories", [])}
+
+    today = pd.Timestamp.today()
+    start = today.replace(day=1)
+    days_passed = (today - start).days + 1
+    end = (start + pd.Timedelta(days=32)).replace(day=1) - pd.Timedelta(days=1)
+    days_remaining = max((end - today).days, 0)
+
+    results = {}
+
+    for cat, budget in budget_map.items():
+        spent = float(grouped.get(cat, 0.0))
+        avg_daily = spent / max(days_passed, 1)
+
+        pct = simulate_changes.get(cat, 0.0)
+        new_avg = avg_daily * (1 + pct)
+
+        projected = spent + new_avg * days_remaining
+
+        results[cat] = {
+            "spent": spent,
+            "budget": budget,
+            "change_pct": pct,
+            "projected": projected,
+            "delta_over_budget": projected - budget
+        }
+
+    total_projected = sum(v['projected'] for v in results.values())
+    total_budget = float(budgets.get("total_budget", 0))
+    overall_delta = total_projected - total_budget
+
+    return {
+        "per_category": results,
+        "total_projected": total_projected,
+        "overall_delta": overall_delta
+    }
+
+
+# -----------------------------------------------------------
+#   3. DAILY CATEGORY HEATMAP BUILDER
+# -----------------------------------------------------------
+
+def build_daily_category_heatmap(exp_month: pd.DataFrame, fill_value=0.0):
+    """
+    Returns pivot table:
+        index   = category
+        columns = day of month
+        values  = amount
+    """
+    if exp_month is None or exp_month.empty:
+        return pd.DataFrame()
+
+    df = exp_month.copy()
+    df['day'] = df['date'].dt.day
+
+    pivot = df.pivot_table(
+        index="category",
+        columns="day",
+        values="amount",
+        aggfunc="sum",
+        fill_value=fill_value
+    )
+
+    # Ensure consistent ordering
+    pivot = pivot.sort_index()
+    pivot = pivot.reindex(sorted(pivot.columns), axis=1)
+
+    return pivot
+
+
+# -----------------------------------------------------------
+#   4. BUDGET HEALTH INSIGHTS
+# -----------------------------------------------------------
+
+def generate_budget_health_insights(pred_results: dict):
+    """
+    Turn overspend prediction into human-friendly insights.
     """
     insights = []
-    tb = status["total_budget"]
-    ts = status["total_spent"]
 
-    # ---------- TOTAL BUDGET INSIGHTS ----------
-    if tb:
-        pct_total = (ts / tb * 100) if tb > 0 else 0
+    offenders = []
+    for cat, r in pred_results.items():
+        budget = r["budget"]
+        projected = r["projected_total"]
+        if budget > 0:
+            pct = (projected / budget) * 100
+            offenders.append((cat, pct, r))
 
-        if pct_total >= 120:
-            insights.append("🔥 You massively overspent your total budget this month.")
-        elif pct_total >= 100:
-            insights.append("⚠ You have reached or exceeded your total monthly budget.")
-        elif pct_total >= 80:
-            insights.append("⚠ You're close to exceeding your total monthly budget.")
+    offenders.sort(key=lambda x: x[1], reverse=True)
 
-    # ---------- CATEGORY INSIGHTS ----------
-    for cat, info in status["per_category"].items():
-        pct = info["pct_used"]
+    # Top 3 offenders
+    for cat, pct, r in offenders[:3]:
+        if pct > 100:
+            days = r["days_to_exceed"]
+            if days is None or days <= 0:
+                insights.append(
+                    f"🔴 **{cat}**: already exceeding or will exceed immediately ({pct-100:.1f}% over)."
+                )
+            else:
+                insights.append(
+                    f"🔴 **{cat}**: projected to exceed its budget by **{pct-100:.1f}%** in ~{int(days)} days."
+                )
 
-        if pct >= 120:
-            insights.append(f"🔥 {cat} budget exceeded by a large margin.")
-        elif pct >= 100:
-            insights.append(f"⚠ You've exceeded your budget for {cat}.")
-        elif pct >= 80:
-            insights.append(f"⚠ You’re close to exceeding the {cat} budget.")
+    if not insights:
+        insights.append("🟢 All categories appear healthy at current pace.")
+
+    insights.append("💡 Tip: Adjust budgets or reduce discretionary expenses to avoid end-month overshoot.")
 
     return insights
