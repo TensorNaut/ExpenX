@@ -1,18 +1,11 @@
 # app/db.py
 """
-Database models and helpers for ExpenX.
-
-Usage (one-time setup after cloning):
-    python -c "from app.db import init_db, seed_default_accounts; init_db(); seed_default_accounts(); print('DB ready')"
-
-This file defines:
-- Account (id, name, currency, balance, kind)
-- Expense (id, date, amount, description, category, payment_source, account_id, ...)
-- Income
-- Ledger
-- Investment
-
+Finalized DB models for ExpenX v1.0
+- Principal change: InvestmentSettlement.principal_reduced is included (default 0.0)
+- Keeps relationships + helper functions intact
+- init_db() avoids circular imports by using local seed_default_accounts()
 """
+
 import os
 from datetime import datetime
 from sqlalchemy import (
@@ -20,7 +13,6 @@ from sqlalchemy import (
     ForeignKey, Index, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
-from sqlalchemy import text
 
 # Config: DB path (env override supported)
 DB_PATH = os.getenv('EXPENX_DB', 'data/expenses.db')
@@ -148,14 +140,14 @@ class InvestmentSettlement(Base):
     id = Column(Integer, primary_key=True, index=True)
     investment_id = Column(Integer, ForeignKey('investments.id'), nullable=False)
     date = Column(Date, nullable=False)
-    amount = Column(Float, nullable=False)
-    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=True)  # <- ensure present
+    amount = Column(Float, nullable=False)          # value redeemed/returned (monetary)
+    principal_reduced = Column(Float, default=0.0, nullable=False)  # principal portion reduced
+    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now())
 
     investment = relationship("Investment", backref="settlements")
 
-# InvestmentSnapshot (timeseries)
 class InvestmentSnapshot(Base):
     __tablename__ = 'investment_snapshots'
     id = Column(Integer, primary_key=True, index=True)
@@ -164,6 +156,14 @@ class InvestmentSnapshot(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=func.now())
 
+class Budget(Base):
+    __tablename__ = 'budgets'
+    id = Column(Integer, primary_key=True, index=True)
+    category = Column(String(128), nullable=True, index=True)   # NULL => total monthly budget
+    amount = Column(Float, nullable=False)
+    period = Column(String(32), default='monthly')              # 'monthly' or 'yearly'
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
 
 # -------------------------
 # Indexes
@@ -178,20 +178,18 @@ Index('idx_investments_date', Investment.date)
 # -------------------------
 # Helpers
 # -------------------------
-from app.schema_validator import validate_and_repair_schema
-
 def init_db(auto_repair_safe: bool = True):
     """
     Initialize DB (create missing tables), run schema validator,
     and ensure default accounts exist.
+    - Does NOT import finance.create_account to avoid circular import.
+    - Uses local seed_default_accounts() which directly uses ORM.
     """
     from sqlalchemy import text
-    from app.schema_validator import validate_and_repair_schema
-
-    # 1. Create tables if not exist
+    # run create_all (safe)
     Base.metadata.create_all(bind=engine, checkfirst=True)
 
-    # 2. Create migrations table if missing
+    # Create migrations tracking table if missing
     with engine.connect() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS applied_migrations (
@@ -202,26 +200,16 @@ def init_db(auto_repair_safe: bool = True):
         """))
         conn.commit()
 
-    # 3. Schema Validator (Safe Mode)
+    # Schema validation / auto-repair (if available)
     try:
+        from app.schema_validator import validate_and_repair_schema
         report = validate_and_repair_schema(engine, Base.metadata, auto_repair=auto_repair_safe)
         print("\n🔍 Schema validator report:", report)
     except Exception as e:
         print("\n⚠ Schema validator error (ignored in Safe Mode):", e)
 
-    # 4. Ensure default accounts exist
-    with engine.connect() as conn:
-        res = conn.execute(text("SELECT COUNT(*) FROM accounts")).fetchone()
-        exists = res[0] if res else 0
-
-    if exists == 0:
-        print("⚙ Creating default system accounts...")
-        create_account("Main", balance=0.0, currency="INR", kind="bank")
-        create_account("Cash", balance=0.0, currency="INR", kind="cash")
-        create_account("Credit Card", balance=0.0, currency="INR", kind="card")
-        print("✔ Default accounts created.")
-
-
+    # Ensure default accounts exist (use local helper)
+    seed_default_accounts()
 
 
 def get_session():
@@ -238,7 +226,6 @@ def seed_default_accounts():
     """
     sess = get_session()
     try:
-        # use case-insensitive check
         existing = {a.name.lower(): a for a in sess.query(Account).all()}
         created = []
         if 'main' not in existing:
@@ -257,29 +244,9 @@ def seed_default_accounts():
             sess.commit()
         else:
             sess.rollback()
-        return created  # list of (name, id) created
+        return created
     except Exception:
         sess.rollback()
         raise
     finally:
         sess.close()
-
-class Budget(Base):
-    __tablename__ = 'budgets'
-    id = Column(Integer, primary_key=True, index=True)
-    category = Column(String(128), nullable=True, index=True)   # NULL => total monthly budget
-    amount = Column(Float, nullable=False)
-    period = Column(String(32), default='monthly')              # 'monthly' or 'yearly'
-    active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=func.now())
-
-# # Optional: quick utility for schema inspection (helpful on GitHub READMEs/demos)
-# if __name__ == "__main__":
-#     print("Initializing DB and seeding default accounts (if missing)...")
-#     init_db()
-#     created = seed_default_accounts()
-#     if created:
-#         print("Created accounts:", created)
-#     else:
-#         print("Default accounts already exist.")
-#     print("DB path:", DB_PATH)

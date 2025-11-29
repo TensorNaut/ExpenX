@@ -1,10 +1,11 @@
 # app/report_generator.py
 """
-Optimized Report Generator for ExpenX
+ExpenX Report Generator (Matplotlib-based, No Plotly, Fast, Stable)
+- Monthly + Yearly PDF Reports
+- Uses Matplotlib charts (no Kaleido, no Plotly)
+- Zero hanging issues
 - Cached DB reads
-- Cached aggregations
-- Cached chart PNGs (memory + disk)
-- Selective chart generation to speed up PDF
+- Generates JSON summary for AI
 """
 
 import io
@@ -12,522 +13,450 @@ import os
 import hashlib
 from datetime import datetime
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+import numpy as np
+
+# Matplotlib (safe backend)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from reportlab.lib.styles import getSampleStyleSheet
-from plotly.io import from_json as plotly_from_json
-import kaleido
 
-# Use your project's DB engine
+import streamlit as st
 from app.db import engine
 
-# Streamlit caching (keeps in memory between runs)
-import streamlit as st
-
-# Cache directory for PNGs
-CACHE_DIR = os.path.join("data", "report_cache")
+# ---------------------------------------------------------
+# Cache Directory
+# ---------------------------------------------------------
+CACHE_DIR = "data/report_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 
-# ---------------------------
-# Utility helpers
-# ---------------------------
-def _read_table_safe(table_name: str) -> pd.DataFrame:
-    """Read a table from DB; fallback to read_sql_query when needed."""
+# ---------------------------------------------------------
+# Safe DB Loader
+# ---------------------------------------------------------
+def _read_table_safe(name):
     try:
-        df = pd.read_sql_table(table_name, con=engine)
-    except Exception:
+        return pd.read_sql_table(name, engine)
+    except:
         try:
-            df = pd.read_sql_query(f"SELECT * FROM {table_name}", con=engine)
-        except Exception:
-            df = pd.DataFrame()
-    df.columns = [c.lower() for c in df.columns]
-    return df
+            return pd.read_sql_query(f"SELECT * FROM {name}", engine)
+        except:
+            return pd.DataFrame()
 
 
-# ---------------------------
-# Cached loaders
-# ---------------------------
+# ---------------------------------------------------------
+# Cached DB loaders
+# ---------------------------------------------------------
 @st.cache_data(ttl=600)
-def load_expenses() -> pd.DataFrame:
-    df = _read_table_safe("expenses")
+def load_expenses():
+    df = _read_table_safe('expenses')
     if not df.empty:
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        if "amount" in df.columns:
-            df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-        df["category"] = df.get("category", "Uncategorized").fillna("Uncategorized")
+        df.columns = map(str.lower, df.columns)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
+        df['category'] = df['category'].fillna('Uncategorized')
     return df
 
-
 @st.cache_data(ttl=600)
-def load_income() -> pd.DataFrame:
-    df = _read_table_safe("income")
-    if not df.empty and "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        if "amount" in df.columns:
-            df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-    return df
-
-
-@st.cache_data(ttl=600)
-def load_accounts() -> pd.DataFrame:
-    df = _read_table_safe("accounts")
-    if not df.empty and "balance" in df.columns:
-        df["balance"] = pd.to_numeric(df["balance"], errors="coerce").fillna(0.0)
-    return df
-
-
-@st.cache_data(ttl=600)
-def load_investments() -> pd.DataFrame:
-    df = _read_table_safe("investments")
+def load_income():
+    df = _read_table_safe('income')
     if not df.empty:
-        for col in ["date", "maturity_date", "last_updated", "created_at"]:
+        df.columns = map(str.lower, df.columns)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
+    return df
+
+@st.cache_data(ttl=600)
+def load_accounts():
+    df = _read_table_safe('accounts')
+    if not df.empty:
+        df.columns = map(str.lower, df.columns)
+        df['balance'] = pd.to_numeric(df['balance'], errors='coerce').fillna(0.0)
+    return df
+
+@st.cache_data(ttl=600)
+def load_investments():
+    df = _read_table_safe('investments')
+    if not df.empty:
+        df.columns = map(str.lower, df.columns)
+        for col in ['date','maturity_date','last_updated']:
             if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce")
-        for nc in ["amount", "principal_remaining", "quantity", "current_price_per_unit", "current_value"]:
-            if nc in df.columns:
-                df[nc] = pd.to_numeric(df[nc], errors="coerce").fillna(0.0)
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+        for col in ['amount','principal_remaining','quantity','current_value']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+    return df
+
+@st.cache_data(ttl=600)
+def load_ledger():
+    df = _read_table_safe('ledger')
+    if not df.empty:
+        df.columns = map(str.lower, df.columns)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
+    return df
+
+@st.cache_data(ttl=600)
+def load_budgets():
+    df = _read_table_safe('budgets')
+    if not df.empty:
+        df.columns = map(str.lower, df.columns)
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce').fillna(0.0)
     return df
 
 
+# ---------------------------------------------------------
+# Aggregation Helpers
+# ---------------------------------------------------------
 @st.cache_data(ttl=600)
-def load_ledger() -> pd.DataFrame:
-    df = _read_table_safe("ledger")
-    if not df.empty and "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    if not df.empty and "amount" in df.columns:
-        df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-    return df
-
-
-@st.cache_data(ttl=600)
-def load_budgets_raw() -> pd.DataFrame:
-    df = _read_table_safe("budgets")
-    if not df.empty and "amount" in df.columns:
-        df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-    return df
-
-
-# ---------------------------
-# Aggregations (cached)
-# ---------------------------
-@st.cache_data(ttl=600)
-def monthly_aggregate(year: int, month: int):
+def monthly_aggregate(year, month):
     exp = load_expenses()
     if exp.empty:
         return pd.DataFrame(), 0.0, pd.DataFrame()
+
     start = pd.Timestamp(year=year, month=month, day=1)
     end = (start + pd.DateOffset(months=1)) - pd.Timedelta(days=1)
-    mdf = exp[(exp["date"] >= start) & (exp["date"] <= end)].copy()
-    total = float(mdf["amount"].sum()) if not mdf.empty else 0.0
-    per_cat = mdf.groupby("category")["amount"].sum().reset_index().rename(columns={"amount": "spent"})
+
+    mdf = exp[(exp['date'] >= start) & (exp['date'] <= end)]
+    total = float(mdf['amount'].sum()) if not mdf.empty else 0.0
+
+    if mdf.empty:
+        per_cat = pd.DataFrame()
+    else:
+        per_cat = (
+            mdf.groupby('category')['amount']
+            .sum().reset_index().rename(columns={'amount':'spent'})
+            .sort_values('spent', ascending=False)
+        )
     return mdf, total, per_cat
 
 
 @st.cache_data(ttl=600)
-def yearly_aggregates(year: int):
+def yearly_aggregate(year):
     exp = load_expenses()
     if exp.empty:
         return pd.DataFrame(), pd.DataFrame()
+
     start = pd.Timestamp(year=year, month=1, day=1)
-    end = pd.Timestamp(year=year, month=12, day=31)
-    ydf = exp[(exp["date"] >= start) & (exp["date"] <= end)].copy()
-    ydf["month"] = ydf["date"].dt.to_period("M").dt.to_timestamp()
-    month_totals = ydf.groupby("month")["amount"].sum().reset_index().rename(columns={"amount": "total_spent"})
-    cat_totals = ydf.groupby("category")["amount"].sum().reset_index().rename(columns={"amount": "total_spent"})
+    end = pd.Timestamp(year+1, month=1, day=1) - pd.Timedelta(days=1)
+
+    ydf = exp[(exp['date'] >= start) & (exp['date'] <= end)]
+    if ydf.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    ydf['month'] = ydf['date'].dt.to_period('M').dt.to_timestamp()
+    month_totals = ydf.groupby('month')['amount'].sum().reset_index().rename(columns={'amount': 'total_spent'})
+    cat_totals = ydf.groupby('category')['amount'].sum().reset_index().rename(columns={'amount': 'total_spent'})
+
     return month_totals, cat_totals
 
 
-# ---------------------------
-# Chart PNG caching (disk + memory)
-# ---------------------------
-def _dataframe_hash(df: pd.DataFrame) -> str:
-    if df is None or df.empty:
-        return "empty"
-    # keep deterministic: use columns order + head/tail sample for big df
-    h = hashlib.sha256()
-    # small representation
-    s = df.to_csv(index=False).encode("utf-8")
-    h.update(s)
-    return h.hexdigest()
-
-
-
-@st.cache_data(ttl=300)
-def cached_fig_png(fig_json: str, chart_name: str, width=1000, height=450, scale=2) -> bytes:
-    """
-    fig_json: string (fig.to_json()) — used to compute deterministic hash
-    Chart is saved to disk cache for reuse across restarts.
-    """
-    # compute hash key
-    key = hashlib.sha256((fig_json + chart_name).encode("utf-8")).hexdigest()
-    png_path = os.path.join(CACHE_DIR, f"{key}.png")
-
-    # If already exists → load from disk
-    if os.path.exists(png_path):
-        with open(png_path, "rb") as f:
-            return f.read()
-
-    # Reconstruct figure from JSON
-    fig = plotly_from_json(fig_json)
-
-    # Render
-    try:
-        img_bytes = fig.to_image(format="png", width=width, height=height, scale=scale)
-    except Exception as e:
-        raise RuntimeError(f"Plotly → PNG failed (ensure kaleido installed): {e}")
-
-    # Save to disk
-    with open(png_path, "wb") as f:
-        f.write(img_bytes)
-
-    return img_bytes
-
-
-
-# ---------------------------
-# Small plot helpers
-# ---------------------------
-def _fig_daily_cumulative(mdf: pd.DataFrame) -> go.Figure:
+# ---------------------------------------------------------
+# Matplotlib Chart Generators
+# ---------------------------------------------------------
+def mpl_daily_chart(mdf):
+    fig, ax = plt.subplots(figsize=(10, 4))
     if mdf.empty:
-        f = go.Figure()
-        f.update_layout(title="No data")
-        return f
-    daily = mdf.groupby(mdf["date"].dt.day)["amount"].sum().reset_index().rename(columns={"date": "day", "amount": "spent"})
-    daily["cumulative"] = daily["spent"].cumsum()
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=daily["day"], y=daily["cumulative"], mode="lines+markers", name="Cumulative"))
-    fig.update_layout(title="Daily Cumulative Spend", xaxis_title="Day", yaxis_title="Amount (₹)", template="plotly_dark")
+        ax.text(0.5, 0.5, "No transactions", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    daily = mdf.groupby(mdf['date'].dt.day)['amount'].sum()
+    cum = daily.cumsum()
+
+    ax.plot(daily.index, cum.values, marker='o', color='#008cba')
+    ax.set_title("Daily Cumulative Spend")
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Amount (₹)")
+    ax.grid(alpha=0.3)
     return fig
 
 
-def _fig_category_bar(per_cat: pd.DataFrame) -> go.Figure:
+def mpl_category_chart(per_cat):
+    fig, ax = plt.subplots(figsize=(10, 4))
     if per_cat.empty:
-        f = go.Figure()
-        f.update_layout(title="No category data")
-        return f
-    fig = px.bar(per_cat.sort_values("spent", ascending=False), x="category", y="spent", title="Category Spend", template="plotly_dark")
+        ax.text(0.5, 0.5, "No category data", ha="center", va="center")
+        ax.axis("off")
+        return fig
+
+    ax.bar(per_cat['category'], per_cat['spent'], color='#e67e22')
+    ax.set_title("Category Spend")
+    ax.set_ylabel("Amount (₹)")
+    plt.xticks(rotation=45, ha="right")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
     return fig
 
 
-def _fig_monthly_line(month_totals: pd.DataFrame) -> go.Figure:
+def mpl_monthly_chart(month_totals):
+    fig, ax = plt.subplots(figsize=(10,4))
     if month_totals.empty:
-        f = go.Figure()
-        f.update_layout(title="No month data")
-        return f
-    fig = px.line(month_totals, x="month", y="total_spent", markers=True, title="Monthly Spend (Total)", template="plotly_dark")
+        ax.text(0.5, 0.5, "No data", ha="center", va="center")
+        ax.axis("off")
+        return fig
+    months = month_totals['month'].dt.strftime("%Y-%m")
+    ax.plot(months, month_totals['total_spent'], marker='o', color='#27ae60')
+    ax.set_title("Monthly Total Spend")
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Amount (₹)")
+    plt.xticks(rotation=45, ha='right')
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
     return fig
 
 
-def _fig_top_category_trends(cat_month_df: pd.DataFrame, top_n=6) -> go.Figure:
-    if cat_month_df.empty:
-        f = go.Figure()
-        f.update_layout(title="No category month data")
-        return f
-    cat_totals = cat_month_df.sum(axis=0).sort_values(ascending=False)
-    top = cat_totals.head(top_n).index.tolist()
-    trimmed = cat_month_df[top]
-    fig = go.Figure()
-    for c in trimmed.columns:
-        fig.add_trace(go.Scatter(x=trimmed.index, y=trimmed[c], mode='lines+markers', name=str(c)))
-    fig.update_layout(title=f"Top {len(trimmed.columns)} Category Trends", xaxis_title='Month', yaxis_title='Amount (₹)', template='plotly_dark')
-    return fig
+# ---------------------------------------------------------
+# Convert Matplotlib → PNG Bytes
+# ---------------------------------------------------------
+def fig_to_png(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=110, bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
 
 
-# ---------------------------
-# PDF composition (selective charts)
-# ---------------------------
-def _compose_pdf(pages: list) -> bytes:
-    """
-    pages: list of dict: {"type":"cover"|"img"|"text", "content": ...}
-    Returns PDF bytes.
-    """
+# ---------------------------------------------------------
+# PDF Composer
+# ---------------------------------------------------------
+def _compose_pdf(pages):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=landscape(A4))
-    width, height = landscape(A4)
+    W, H = landscape(A4)
     styles = getSampleStyleSheet()
+
     for page in pages:
-        ptype = page.get("type")
-        if ptype == "cover":
-            title = page.get("title", "ExpenX Report")
-            subtitle = page.get("subtitle", "")
-            lines = page.get("lines", [])
+        if page['type'] == 'cover':
             c.setFont("Helvetica-Bold", 24)
-            c.drawString(40, height - 60, title)
+            c.drawString(40, H-60, page.get("title","ExpenX Report"))
             c.setFont("Helvetica", 10)
-            c.drawString(40, height - 90, subtitle)
-            y = height - 120
-            for ln in lines:
-                c.drawString(40, y, ln)
-                y -= 16
+            c.drawString(40, H-90, page.get("subtitle",""))            
+            y = H-120
+            for line in page.get("lines", []):
+                c.drawString(40, y, line)
+                y -= 14
             c.showPage()
-        elif ptype == "img":
-            img_bytes = page.get("bytes")
-            if img_bytes:
-                img = ImageReader(io.BytesIO(img_bytes))
-                c.drawImage(img, 30, 40, width - 60, height - 80, preserveAspectRatio=True)
-            else:
-                c.setFont("Helvetica", 12)
-                c.drawString(40, height - 60, "Empty chart")
+
+        elif page['type'] == 'img':
+            img = ImageReader(io.BytesIO(page['bytes']))
+            c.drawImage(img, 30, 40, W-60, H-80, preserveAspectRatio=True)
             c.showPage()
-        elif ptype == "text":
-            title = page.get("title", "")
-            body_lines = page.get("lines", [])
+
+        elif page['type'] == 'text':
             c.setFont("Helvetica-Bold", 16)
-            c.drawString(40, height - 50, title)
+            c.drawString(40, H-60, page['title'])
             c.setFont("Helvetica", 10)
-            y = height - 80
-            for ln in body_lines:
-                c.drawString(40, y, ln)
+            y = H-100
+            for line in page['lines']:
+                c.drawString(40, y, line)
                 y -= 14
                 if y < 80:
                     c.showPage()
-                    y = height - 80
+                    y = H-80
             c.showPage()
+
     c.save()
     buffer.seek(0)
-    pdf_bytes = buffer.read()
-    buffer.close()
-    return pdf_bytes
+    return buffer.read()
 
 
-# ---------------------------
-# Public report generation (fast / selective)
-# ---------------------------
-def generate_monthly_report(year: int, month: int, include_charts: dict = None) -> bytes:
-    """
-    include_charts: dict controlling which charts to render, keys:
-      daily, categories, accounts, investments, ledger, top_categories_trend
-    default: generate daily + categories + accounts + investments + ledger
-    """
-    if include_charts is None:
-        include_charts = {"daily": True, "categories": True, "accounts": True, "investments": True, "ledger": True}
-
-    # load small datasets (cached)
+# ---------------------------------------------------------
+# Monthly Report
+# ---------------------------------------------------------
+def generate_monthly_report(year, month):
     mdf, total_exp, per_cat = monthly_aggregate(year, month)
-    inc = load_income()
-    acc = load_accounts()
-    inv = load_investments()
-    ldg = load_ledger()
 
-    # compute income for month
+    income = load_income()
     start = pd.Timestamp(year=year, month=month, day=1)
     end = (start + pd.DateOffset(months=1)) - pd.Timedelta(days=1)
-    inc_month = inc[(inc["date"] >= start) & (inc["date"] <= end)] if not inc.empty else pd.DataFrame()
-    total_inc = float(inc_month["amount"].sum()) if not inc_month.empty else 0.0
-    net_flow = total_inc - total_exp
+    inc_m = income[(income['date'] >= start)&(income['date'] <=end)]
+    total_inc = float(inc_m['amount'].sum()) if not inc_m.empty else 0.0
+    net = total_inc - total_exp
 
-    # pages builder
-    pages = []
-    pages.append({"type": "cover",
-                  "title": "ExpenX — Monthly Report",
-                  "subtitle": f"{start.strftime('%B %Y')}  •  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                  "lines": [f"Total Income: ₹{total_inc:,.2f}", f"Total Expense: ₹{total_exp:,.2f}", f"Net Flow: ₹{net_flow:,.2f}"]})
+    # Charts
+    daily_fig = mpl_daily_chart(mdf)
+    daily_png = fig_to_png(daily_fig)
 
-    # charts (use cached PNG generator)
-    if include_charts.get("daily", True):
-        fig = _fig_daily_cumulative(mdf)
-        fig_json = fig.to_json()
-        img = cached_fig_png(fig_json, chart_name=f"monthly_daily_{year}_{month}")
-        pages.append({"type": "img", "bytes": img})
+    cat_fig = mpl_category_chart(per_cat)
+    cat_png = fig_to_png(cat_fig)
 
-    if include_charts.get("categories", True):
-        fig = _fig_category_bar(per_cat)
-        fig_json = fig.to_json()
-        img = cached_fig_png(fig_json, chart_name=f"monthly_cat_{year}_{month}")
-        pages.append({"type": "img", "bytes": img})
-
-    # accounts snapshot (text page)
-    acc_rows = []
-    for _, r in acc.iterrows() if not acc.empty else []:
-        acc_rows.append(f"{r.get('name','')}  |  Balance: ₹{float(r.get('balance',0)):,.2f}  |  Kind: {r.get('kind','')}")
-    pages.append({"type": "text", "title": "Accounts Snapshot", "lines": acc_rows or ["No accounts found."]})
-
-    # investments snapshot (text)
-    inv_rows = []
-    if not inv.empty:
-        for _, r in inv.iterrows():
-            inv_rows.append(f"ID:{int(r.get('id',0))} | {r.get('type','')} | Invested: ₹{float(r.get('amount',0)):,.2f} | Current: ₹{float(r.get('current_value',0)):,.2f}")
-    else:
-        inv_rows.append("No investments found.")
-    pages.append({"type": "text", "title": "Investments Snapshot", "lines": inv_rows})
-
-    # ledger highlights
-    if not ldg.empty:
-        ldg_m = ldg[(ldg["date"] >= start) & (ldg["date"] <= end)]
-        lent = float(ldg_m[ldg_m["direction"] == "lent"]["amount"].sum()) if not ldg_m.empty else 0.0
-        borrowed = float(ldg_m[ldg_m["direction"] == "borrowed"]["amount"].sum()) if not ldg_m.empty else 0.0
-        pages.append({"type": "text", "title": "Ledger Highlights", "lines": [f"Total Lent: ₹{lent:,.2f}", f"Total Borrowed: ₹{borrowed:,.2f}"]})
-    else:
-        pages.append({"type": "text", "title": "Ledger Highlights", "lines": ["No ledger entries found."]})
-
-    pdf_bytes = _compose_pdf(pages)
-    return pdf_bytes
-
-
-def generate_yearly_report(year: int, include_charts: dict = None) -> bytes:
-    """
-    include_charts: keys: monthly_line, top_category_trends
-    """
-    if include_charts is None:
-        include_charts = {"monthly_line": True, "top_category_trends": True}
-
-    month_totals, cat_totals = yearly_aggregates(year)
-    inv = load_investments()
-    ldg = load_ledger()
+    # Accounts
     acc = load_accounts()
+    acc_lines = [
+        f"{row['name']}: ₹{float(row['balance']):,.2f} ({row.get('kind','')})"
+        for _, row in acc.iterrows()
+    ]
 
-    pages = []
-    pages.append({"type": "cover",
-                  "title": f"ExpenX — Yearly Report ({year})",
-                  "subtitle": f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                  "lines": []})
-
-    if include_charts.get("monthly_line", True) and not month_totals.empty:
-        fig = _fig_monthly_line(month_totals)
-        fig_json = fig.to_json()
-        img = cached_fig_png(fig_json, chart_name=f"yearly_monthline_{year}")
-        pages.append({"type": "img", "bytes": img})
-
-    # top categories
-    if include_charts.get("top_category_trends", True) and not cat_totals.empty:
-        # create a cross-month pivot for top categories (lightweight): reuse yearly_aggregates results if needed
-        top_cats = cat_totals.sort_values("total_spent", ascending=False).head(12)["category"].tolist()
-        # For simplicity include cat_totals as text summary
-        cat_lines = [f"{row['category']}: ₹{row['total_spent']:,.2f}" for _, row in cat_totals.sort_values("total_spent", ascending=False).head(20).iterrows()]
-        pages.append({"type": "text", "title": "Top Categories (Year)", "lines": cat_lines})
-
-    # investments summary
-    inv_rows = []
+    # Investments
+    inv = load_investments()
+    inv_lines = []
     if not inv.empty:
         for _, r in inv.iterrows():
-            inv_rows.append(f"ID:{int(r.get('id',0))} | {r.get('type','')} | Current: ₹{float(r.get('current_value',0)):,.2f}")
+            inv_lines.append(f"{r.get('type','')} | Invested: ₹{r.get('amount',0):,.2f} | Current: ₹{r.get('current_value',0):,.2f}")
     else:
-        inv_rows.append("No investments found.")
-    pages.append({"type": "text", "title": "Investments Summary (Year)", "lines": inv_rows})
+        inv_lines.append("No investments found.")
 
-    # ledger yearly totals
-    if not ldg.empty:
-        ldg_year = ldg[ldg["date"].dt.year == year]
-        lent = float(ldg_year[ldg_year["direction"] == "lent"]["amount"].sum()) if not ldg_year.empty else 0.0
-        borrowed = float(ldg_year[ldg_year["direction"] == "borrowed"]["amount"].sum()) if not ldg_year.empty else 0.0
-        pages.append({"type": "text", "title": "Ledger Summary (Year)", "lines": [f"Total Lent: ₹{lent:,.2f}", f"Total Borrowed: ₹{borrowed:,.2f}"]})
+    # Ledger
+    ledger = load_ledger()
+    ledger_month = ledger[(ledger['date'] >= start)&(ledger['date'] <= end)]
+    lent = float(ledger_month[ledger_month['direction']=='lent']['amount'].sum()) if not ledger_month.empty else 0.0
+    borrowed = float(ledger_month[ledger_month['direction']=='borrowed']['amount'].sum()) if not ledger_month.empty else 0.0
+
+    pages = [
+        {
+            "type": "cover",
+            "title": "ExpenX — Monthly Report",
+            "subtitle": f"{start.strftime('%B %Y')} • Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "lines": [
+                f"Total Income: ₹{total_inc:,.2f}",
+                f"Total Expense: ₹{total_exp:,.2f}",
+                f"Net Flow: ₹{net:,.2f}",
+            ]
+        },
+        {"type":"img","bytes":daily_png},
+        {"type":"img","bytes":cat_png},
+        {"type":"text","title":"Accounts Snapshot","lines":acc_lines},
+        {"type":"text","title":"Investments Snapshot","lines":inv_lines},
+        {"type":"text","title":"Ledger Summary",
+         "lines":[f"Total Lent: ₹{lent:,.2f}", f"Total Borrowed: ₹{borrowed:,.2f}"]},
+    ]
+
+    return _compose_pdf(pages)
+
+
+# ---------------------------------------------------------
+# Yearly Report
+# ---------------------------------------------------------
+def generate_yearly_report(year):
+    month_totals, cat_totals = yearly_aggregate(year)
+
+    monthly_fig = mpl_monthly_chart(month_totals)
+    monthly_png = fig_to_png(monthly_fig)
+
+    cat_fig = mpl_category_chart(cat_totals.rename(columns={'total_spent':'spent'}))
+    cat_png = fig_to_png(cat_fig)
+
+    inv = load_investments()
+    ledger = load_ledger()
+
+    inv_lines = []
+    if not inv.empty:
+        for _, r in inv.iterrows():
+            inv_lines.append(f"{r.get('type','')} • Current: ₹{r.get('current_value',0):,.2f}")
     else:
-        pages.append({"type": "text", "title": "Ledger Summary (Year)", "lines": ["No ledger data."]})
+        inv_lines.append("No investments found.")
 
-    pdf_bytes = _compose_pdf(pages)
-    return pdf_bytes
+    ledger_year = ledger[ledger['date'].dt.year == year]
+    lent = float(ledger_year[ledger_year['direction']=='lent']['amount'].sum()) if not ledger_year.empty else 0.0
+    borrowed = float(ledger_year[ledger_year['direction']=='borrowed']['amount'].sum()) if not ledger_year.empty else 0.0
+
+    pages = [
+        {
+            "type":"cover",
+            "title":f"ExpenX — Yearly Report ({year})",
+            "subtitle": f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "lines":[]
+        },
+        {"type":"img","bytes":monthly_png},
+        {"type":"img","bytes":cat_png},
+        {"type":"text","title":"Investments","lines":inv_lines},
+        {"type":"text","title":"Ledger Summary",
+         "lines":[f"Total Lent: ₹{lent:,.2f}", f"Total Borrowed: ₹{borrowed:,.2f}"]},
+    ]
+
+    return _compose_pdf(pages)
 
 
-def generate_overall_report(year: int, month: int = None, period: str = "monthly", include_charts: dict = None) -> bytes:
-    """Wrapper to generate monthly or yearly report. include_charts is forwarded."""
-    if period == "monthly":
+# ---------------------------------------------------------
+# Unified Wrapper
+# ---------------------------------------------------------
+def generate_overall_report(year, month=None, period='monthly'):
+    if period == 'monthly':
         if month is None:
-            raise ValueError("month required for monthly report")
-        return generate_monthly_report(year, month, include_charts=include_charts)
-    elif period == "yearly":
-        return generate_yearly_report(year, include_charts=include_charts)
-    else:
-        raise ValueError("period must be 'monthly' or 'yearly'")
+            raise ValueError("month required")
+        return generate_monthly_report(year, month)
+    return generate_yearly_report(year)
 
 
-# ---------------------------
-# Summary JSON (cached)
-# ---------------------------
+# ---------------------------------------------------------
+# JSON Summary for AI
+# ---------------------------------------------------------
 @st.cache_data(ttl=300)
-def generate_summary_json(period: str = "monthly", year: int = None, month: int = None) -> dict:
-    """
-    Return structured summary suitable for AI: income, expense, net, category totals,
-    accounts, investments, ledger entries, budgets.
-    """
+def generate_summary_json(period='monthly', year=None, month=None):
     exp = load_expenses()
     inc = load_income()
     acc = load_accounts()
     inv = load_investments()
     ldg = load_ledger()
-    budgets = load_budgets_raw()
+    bud = load_budgets()
 
-    if period == "monthly":
-        if year is None or month is None:
-            raise ValueError("monthly requires year & month")
+    if period=='monthly':
         start = pd.Timestamp(year=year, month=month, day=1)
         end = (start + pd.DateOffset(months=1)) - pd.Timedelta(days=1)
-        period_label = start.strftime("%B %Y")
-    elif period == "yearly":
-        if year is None:
-            raise ValueError("yearly requires year")
+        label = start.strftime("%B %Y")
+    else:
         start = pd.Timestamp(year=year, month=1, day=1)
         end = pd.Timestamp(year=year, month=12, day=31)
-        period_label = str(year)
-    else:
-        raise ValueError("period must be 'monthly' or 'yearly'")
+        label = str(year)
 
-    exp_p = exp[(exp["date"] >= start) & (exp["date"] <= end)].copy() if not exp.empty else pd.DataFrame()
-    inc_p = inc[(inc["date"] >= start) & (inc["date"] <= end)].copy() if not inc.empty else pd.DataFrame()
-    ldg_p = ldg[(ldg["date"] >= start) & (ldg["date"] <= end)].copy() if not ldg.empty else pd.DataFrame()
+    exp_p = exp[(exp['date']>=start)&(exp['date']<=end)] if not exp.empty else pd.DataFrame()
+    inc_p = inc[(inc['date']>=start)&(inc['date']<=end)] if not inc.empty else pd.DataFrame()
+    ldg_p = ldg[(ldg['date']>=start)&(ldg['date']<=end)] if not ldg.empty else pd.DataFrame()
 
-    total_exp = float(exp_p["amount"].sum()) if not exp_p.empty else 0.0
-    total_inc = float(inc_p["amount"].sum()) if not inc_p.empty else 0.0
-    net_flow = total_inc - total_exp
+    total_exp = float(exp_p['amount'].sum()) if not exp_p.empty else 0.0
+    total_inc = float(inc_p['amount'].sum()) if not inc_p.empty else 0.0
+    net = total_inc - total_exp
 
     cat_list = []
     if not exp_p.empty:
-        cat_list = exp_p.groupby("category")["amount"].sum().reset_index().rename(columns={"amount": "spent"}).sort_values("spent", ascending=False).to_dict(orient="records")
+        cat_list = (
+            exp_p.groupby('category')['amount']
+            .sum().reset_index().rename(columns={'amount':'spent'})
+            .sort_values('spent', ascending=False)
+            .to_dict(orient='records')
+        )
 
-    accounts_list = []
-    if not acc.empty:
-        for _, r in acc.iterrows():
-            accounts_list.append({
-                "id": int(r.get("id", 0)),
-                "name": r.get("name", ""),
-                "kind": r.get("kind", ""),
-                "balance": float(r.get("balance", 0)),
-                "currency": r.get("currency", "")
-            })
+    acc_list = [
+        {"name": r.get('name',''),
+         "kind": r.get('kind',''),
+         "balance": float(r.get('balance',0))}
+        for _, r in acc.iterrows()
+    ]
 
-    investments_list = []
-    if not inv.empty:
-        for _, r in inv.iterrows():
-            investments_list.append({
-                "id": int(r.get("id", 0)),
-                "type": r.get("type", ""),
-                "amount_invested": float(r.get("amount", 0)),
-                "principal_remaining": float(r.get("principal_remaining", 0)) if "principal_remaining" in r.index else 0.0,
-                "current_value": float(r.get("current_value", 0)) if "current_value" in r.index else 0.0,
-                "status": r.get("status", "")
-            })
+    inv_list = [
+        {
+            "type": r.get('type',''),
+            "invested": float(r.get('amount',0)),
+            "current": float(r.get('current_value',0)),
+            "status": r.get('status','')
+        }
+        for _, r in inv.iterrows()
+    ]
 
-    ledger_entries = []
-    ledger_summary = {"total_lent": 0.0, "total_borrowed": 0.0}
-    if not ldg_p.empty:
-        ledger_summary["total_lent"] = float(ldg_p[ldg_p["direction"] == "lent"]["amount"].sum()) if "direction" in ldg_p.columns else 0.0
-        ledger_summary["total_borrowed"] = float(ldg_p[ldg_p["direction"] == "borrowed"]["amount"].sum()) if "direction" in ldg_p.columns else 0.0
-        ledger_entries = ldg_p.sort_values("date", ascending=False).to_dict(orient="records")
+    ledger_summary = {
+        "lent": float(ldg_p[ldg_p['direction']=='lent']['amount'].sum()) if not ldg_p.empty else 0.0,
+        "borrowed": float(ldg_p[ldg_p['direction']=='borrowed']['amount'].sum()) if not ldg_p.empty else 0.0,
+        "entries": ldg_p.to_dict(orient='records')
+    }
 
-    budgets_list = []
-    if not budgets.empty:
-        budgets = budgets.copy()
-        budgets.columns = [c.lower() for c in budgets.columns]
-        for _, r in budgets.iterrows():
-            budgets_list.append({
-                "category": r.get("category"),
-                "amount": float(r.get("amount", 0)),
-                "period": r.get("period"),
-                "active": bool(r.get("active", 1))
-            })
+    budgets_list = bud.to_dict(orient='records') if not bud.empty else []
 
-    summary = {
-        "period_type": period,
-        "period_label": period_label,
+    return {
+        "period": period,
+        "label": label,
         "range": {"start": str(start), "end": str(end)},
-        "totals": {"income": total_inc, "expense": total_exp, "net_flow": net_flow, "category_totals": cat_list},
-        "accounts": accounts_list,
-        "investments": investments_list,
-        "ledger": {"summary": ledger_summary, "entries": ledger_entries},
+        "totals": {
+            "income": total_inc,
+            "expense": total_exp,
+            "net_flow": net,
+            "category_totals": cat_list
+        },
+        "accounts": acc_list,
+        "investments": inv_list,
+        "ledger": ledger_summary,
         "budgets": budgets_list
     }
-    return summary

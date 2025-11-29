@@ -7,8 +7,6 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from datetime import timedelta
 import numpy as np
-import kaleido
-
 
 from app.tracker import (
     add_expense,
