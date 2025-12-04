@@ -9,48 +9,42 @@ from datetime import timedelta
 import numpy as np
 
 from app.tracker import (
-    add_expense,
-    get_expenses,
-    delete_expense_by_id,
-    get_expense_by_id,
-    update_expense,
-    get_category_options,
-    predict_category,
-    load_model,
+    load_model, predict_category,
+    add_expense, get_expenses,
+    get_expense_by_id, update_expense, delete_expense_by_id,
+    get_category_options
 )
+
 from app.finance import (
-    get_accounts,
-    create_account,
-    add_income,
-    transfer_between_accounts,
-    get_account_by_name,
-    add_ledger_entry,
-    get_ledger,
+    create_account, get_accounts,
+    get_account_by_name, add_income,
+    transfer_between_accounts, get_account_transactions,
+    delete_account, settle_credit_card, get_income
 )
-from app.finance import delete_account
-from app.finance import get_accounts
 
 from app.ledger import (
-    create_person,
-    list_persons,
-    add_entry_for_person,
-    get_entries_by_person,
-    settle_entry,
-    mark_entry_settled,
-    get_person_summary,
-    overall_summary,
-    due_reminders,
-    person_leaderboard
+    add_ledger_entry, get_ledger,
+    create_person, list_persons, update_person, delete_person,
+    add_entry_for_person, get_entries_by_person,
+    settle_entry, mark_entry_settled,
+    get_person_summary, overall_summary,
+    due_reminders, person_leaderboard
 )
 
 from app.investments import (
-    create_investment,
-    list_investments,
-    get_investment_by_id,
-    redeem_investment,
-    get_settlements_for_investment,
-    portfolio_summary,
+    create_investment, list_investments,
+    get_investment_by_id, redeem_investment,
+    get_settlements_for_investment, portfolio_summary,
     _unit_label_for_type
+)
+
+from app.budget_engine import (
+    compute_budget, load_budgets, set_budget, get_budgets,
+    get_budget_for_category, delete_budget,
+    save_category_budget, save_total_budget,
+    predict_overspend_per_category, category_stress_test,
+    build_daily_category_heatmap, generate_budget_health_insights,
+    load_budget_df
 )
 
 from app.visualizer import (
@@ -65,17 +59,9 @@ from app.visualizer import (
     get_dashboard_data
 )
 
-from app.budget_repo import load_budgets
-
-from app.budget_engine import (
-    compute_budget, 
-    predict_overspend_per_category, category_stress_test, 
-    build_daily_category_heatmap, generate_budget_health_insights
-)
-
 from app.visual_reports import plot_monthly_stacked
 from app.report_generator import generate_overall_report
-
+from app.db import get_session, engine, Base
 
 
 # -----------------------------------------------------------
@@ -658,7 +644,6 @@ if choice == "📊 Analytics / Dashboard":
             st.stop()
 
         # -------------------- Load Budgets -------------------------
-        from app.budget_repo import load_budgets
         budgets_data = load_budgets()
 
         total_budget = budgets_data.get("total_budget", 0)
@@ -1308,8 +1293,6 @@ elif choice == "Edit Expense":
 # BUDGET MANAGEMENT
 # ===========================================================
 elif choice == "Budgets":
-
-    from app.budget_repo import load_budget_df, save_total_budget, save_category_budget
     from app.settings import get_setting
 
     st.header("📊 Budget Management")

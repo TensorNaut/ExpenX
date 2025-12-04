@@ -7,7 +7,7 @@ from sentence_transformers import SentenceTransformer
 import pandas as pd
 
 from app.db import get_session, Expense, engine, init_db
-from app.finance import adjust_balance, get_accounts
+# from app.finance import adjust_balance, get_accounts
 from sqlalchemy import text
 
 # Model paths (env / defaults)
@@ -40,7 +40,7 @@ def load_model(model_path=DEFAULT_MODEL_PATH, clf_path=DEFAULT_CLF_PATH) -> bool
     except Exception:
         return False
 
-init_db()
+# init_db()
 
 def predict_category(description: str) -> Optional[str]:
     if not description or not description.strip():
@@ -56,6 +56,7 @@ def predict_category(description: str) -> Optional[str]:
         return None
 
 def _map_payment_source_to_account_id(payment_source: Optional[str]) -> Optional[int]:
+    from app.finance import get_accounts
     """
     Map a payment_source string (account name) to account_id.
     Returns None for Cash / Credit Card / other non-account values.
@@ -84,6 +85,8 @@ def add_expense(amount: float,
                 account_id: Optional[int] = None,
                 ocr_confidence: Optional[float]=None,
                 use_model_when_none: bool = True) -> int:
+    from app.finance import adjust_balance
+    from app.db import Expense, get_session, engine
     """
     Add an expense and optionally debit a linked account.
     If category is None and use_model_when_none True => try predict.
@@ -147,11 +150,13 @@ def add_expense(amount: float,
     return eid
 
 def get_expenses(limit: int = 1000, offset: int = 0) -> pd.DataFrame:
+    from app.db import Expense, get_session, engine
     query = "SELECT id, date as Date, amount as Amount, description as Description, category as Category, source, payment_source, account_id, ocr_confidence, created_at FROM expenses ORDER BY date DESC, id DESC LIMIT ? OFFSET ?"
     df = pd.read_sql_query(query, engine, params=(limit, offset), parse_dates=['Date','created_at'])
     return df
 
 def get_expense_by_id(eid: int) -> Optional[Dict[str, Any]]:
+    from app.db import Expense, get_session, engine
     sess = get_session()
     try:
         r = sess.query(Expense).filter(Expense.id == eid).first()
@@ -173,6 +178,8 @@ def get_expense_by_id(eid: int) -> Optional[Dict[str, Any]]:
         sess.close()
 
 def update_expense(eid: int, **fields) -> bool:
+    from app.db import Expense, get_session, engine
+    from app.finance import adjust_balance
     """
     Update an expense.
     This implementation will reconcile account balances if account_id or amount changes:
@@ -237,6 +244,8 @@ def update_expense(eid: int, **fields) -> bool:
         sess.close()
 
 def delete_expense_by_id(eid: int) -> bool:
+    from app.finance import adjust_balance
+    from app.db import Expense, get_session, engine
     """
     Delete expense. As a conservative approach, when deleting, refund the amount back to the linked account (if any).
     """
@@ -260,6 +269,7 @@ def delete_expense_by_id(eid: int) -> bool:
         sess.close()
 
 def get_category_options() -> list[str]:
+    from app.db import Expense, get_session
     """
     Returns category options for dropdowns.
     Tries to read classifier labels (if available),

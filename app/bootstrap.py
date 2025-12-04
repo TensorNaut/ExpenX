@@ -1,23 +1,11 @@
 from sqlalchemy import text
-from app.db import engine, init_db
-from app.finance import create_account
+from app.db import engine, init_db, seed_default_accounts
 
 def bootstrap():
-    """
-    Runs after DB init.
-    Creates default accounts if missing.
-    """
-
-    # 1. Initialize DB
+    print("Running bootstrap...")
     init_db(auto_repair_safe=True)
 
-    # 2. Create default accounts if missing
-    with engine.connect() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM accounts")).fetchone()[0]
+    created = seed_default_accounts()
+    if created:
+        print("Default accounts created:", created)
 
-    if count == 0:
-        print("⚙ Creating default system accounts...")
-        create_account("Main", balance=0.0, currency="INR", kind="bank")
-        create_account("Cash", balance=0.0, currency="INR", kind="cash")
-        create_account("Credit Card", balance=0.0, currency="INR", kind="card")
-        print("✔ Default accounts created.")

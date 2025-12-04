@@ -5,6 +5,9 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, date, timedelta
+#from app.db import engine, get_session, Budget
+from sqlalchemy import text
+from typing import Optional, List, Dict, Any
 
 
 # -----------------------------------------------------------
@@ -267,3 +270,160 @@ def generate_budget_health_insights(pred_results: dict):
     insights.append("💡 Tip: Adjust budgets or reduce discretionary expenses to avoid end-month overshoot.")
 
     return insights
+
+
+# -------------------------
+# Budget model helpers (CRUD)
+# -------------------------
+def set_budget(category: Optional[str], amount: float, period: str = 'monthly', active: bool = True) -> int:
+    from app.db import Budget, get_session
+    """
+    Create or update a budget.
+    If a budget exists for the same category + period, update it (overwrite amount & active).
+    If category is None -> total budget for the period.
+    """
+    if amount <= 0:
+        raise ValueError("Budget amount must be positive")
+    period = period if period in ('monthly', 'yearly') else 'monthly'
+    sess = get_session()
+    try:
+        # find existing
+        q = sess.query(Budget).filter(func.coalesce(Budget.category, '') == (category or ''), Budget.period == period)
+        existing = q.first()
+        if existing:
+            existing.amount = float(amount)
+            existing.active = bool(active)
+            sess.commit()
+            return existing.id
+        b = Budget(category=category, amount=float(amount), period=period, active=bool(active))
+        sess.add(b)
+        sess.commit()
+        return b.id
+    except Exception:
+        sess.rollback()
+        raise
+    finally:
+        sess.close()
+
+def get_budgets(active_only: bool = False) -> list:
+    from app.db import Budget, get_session
+    sess = get_session()
+    try:
+        q = sess.query(Budget).order_by(Budget.period, Budget.category.nullsfirst(), Budget.id.desc())
+        if active_only:
+            q = q.filter(Budget.active == True)
+        rows = q.all()
+        out = []
+        for r in rows:
+            out.append({
+                'id': r.id,
+                'category': r.category,
+                'amount': float(r.amount),
+                'period': r.period,
+                'active': bool(r.active),
+                'created_at': r.created_at.isoformat() if r.created_at else None
+            })
+        return out
+    finally:
+        sess.close()
+
+def get_budget_for_category(category: Optional[str], period: str = 'monthly'):
+    from app.db import Budget, get_session
+    sess = get_session()
+    try:
+        r = sess.query(Budget).filter(func.coalesce(Budget.category, '') == (category or ''), Budget.period == period).first()
+        if not r:
+            return None
+        return {
+            'id': r.id,
+            'category': r.category,
+            'amount': float(r.amount),
+            'period': r.period,
+            'active': bool(r.active),
+            'created_at': r.created_at.isoformat() if r.created_at else None
+        }
+    finally:
+        sess.close()
+
+def delete_budget(budget_id: int) -> bool:
+    from app.db import Budget, get_session
+    sess = get_session()
+    try:
+        b = sess.query(Budget).filter(Budget.id == budget_id).first()
+        if not b:
+            return False
+        sess.delete(b)
+        sess.commit()
+        return True
+    except Exception:
+        sess.rollback()
+        raise
+    finally:
+        sess.close()
+
+
+
+def load_budget_df():
+    """
+    Loads budgets from DB and returns a clean Pandas DataFrame.
+    """
+    raw = get_budgets()  # list of dicts
+    if not raw:
+        return pd.DataFrame(columns=[
+            "id", "category", "amount", "period", "active", "created_at"
+        ])
+
+    df = pd.DataFrame(raw)
+    df["category"] = df["category"].replace({None: pd.NA})
+    return df
+
+
+def load_budgets():
+    from app.db import engine
+    """Return budgets in normalized dict format used by both tabs."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT * FROM budgets WHERE active = 1")).fetchall()
+
+    if not rows:
+        return {"total_budget": 0, "categories": []}
+
+    # Convert SQL rows to dict
+    df = pd.DataFrame(rows, columns=["id","category","amount","period","active","created_at"])
+
+    # Total Budget = rows where category is NULL
+    total_budget_row = df[df["category"].isna()]
+    total_budget = float(total_budget_row["amount"].iloc[0]) if not total_budget_row.empty else 0
+
+    # Category Budgets = rows where category is NOT NULL
+    cat_rows = df[df["category"].notna()]
+    categories = [
+        {"category": row["category"], "amount": float(row["amount"])}
+        for _, row in cat_rows.iterrows()
+    ]
+
+    return {"total_budget": total_budget, "categories": categories}
+
+
+
+def save_total_budget(amount: float):
+    """Save or update the total monthly budget."""
+    return set_budget(None, amount)
+
+
+def save_category_budget(category: str, amount: float):
+    from app.db import engine
+    with engine.connect() as conn:
+        # deactivate existing entry
+        conn.execute(text("""
+            UPDATE budgets 
+            SET active = 0 
+            WHERE category = :c
+        """), {"c": category})
+
+        # insert new
+        conn.execute(text("""
+            INSERT INTO budgets (category, amount, period, active)
+            VALUES (:c, :a, 'monthly', 1)
+        """), {"c": category, "a": amount})
+
+        conn.commit()

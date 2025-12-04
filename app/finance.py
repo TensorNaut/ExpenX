@@ -2,11 +2,9 @@
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
-from app.db import get_session, Account, Income, Ledger, Expense, Budget, init_db
+from app.db import get_session, Account, Income, Ledger, Expense, Budget
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-
-init_db()
 
 def create_account(name: str, initial_balance: float = 0.0, currency: str = 'INR', kind: str = 'bank') -> int:
     """
@@ -82,7 +80,6 @@ def get_account_by_name(name: str) -> Optional[Dict[str,Any]]:
         }
     finally:
         sess.close()
-
 
 def adjust_balance(account_id: int, delta: float) -> bool:
     """
@@ -179,61 +176,6 @@ def transfer_between_accounts(from_account_id: int, to_account_id: int, amount: 
     finally:
         sess.close()
 
-def add_ledger_entry(account_id: Optional[int], amount: float, direction: str, party: str, date_val: date = None, due_date: Optional[date] = None, purpose: str = '', contact: str = '', notes: str = '', affects_balance: bool = False) -> int:
-    """
-    Add ledger entry. If affects_balance True and account_id provided, adjusts account balance:
-      - direction == 'lent'  -> you gave money to someone => balance decreases by amount
-      - direction == 'borrowed' -> you borrowed money => balance increases by amount
-    """
-    if direction not in ('lent','borrowed'):
-        raise ValueError("direction must be 'lent' or 'borrowed'")
-    if date_val is None:
-        date_val = datetime.now().date()
-    sess = get_session()
-    try:
-        if account_id:
-            acct = sess.query(Account).filter(Account.id == account_id).first()
-            if not acct:
-                raise ValueError("Account not found")
-        entry = Ledger(account_id=account_id, amount=float(amount), direction=direction, party=party, date=date_val, due_date=due_date, purpose=purpose, contact=contact, notes=notes, affects_balance=bool(affects_balance))
-        sess.add(entry)
-        # adjust balance if requested
-        if affects_balance and account_id:
-            if direction == 'lent':
-                acct.balance = float(acct.balance or 0.0) - float(amount)
-            else:  # borrowed
-                acct.balance = float(acct.balance or 0.0) + float(amount)
-        sess.commit()
-        return entry.id
-    except Exception:
-        sess.rollback()
-        raise
-    finally:
-        sess.close()
-
-def get_ledger(account_id: Optional[int]=None, limit:int=200) -> List[Dict[str,Any]]:
-    sess = get_session()
-    try:
-        q = sess.query(Ledger).order_by(Ledger.date.desc())
-        if account_id:
-            q = q.filter(Ledger.account_id == account_id)
-        rows = q.limit(limit).all()
-        return [{
-            'id': r.id,
-            'date': r.date.isoformat(),
-            'amount': float(r.amount),
-            'direction': r.direction,
-            'party': r.party,
-            'due_date': r.due_date.isoformat() if r.due_date else None,
-            'purpose': r.purpose,
-            'contact': r.contact,
-            'notes': r.notes,
-            'affects_balance': bool(r.affects_balance),
-            'account_id': r.account_id
-        } for r in rows]
-    finally:
-        sess.close()
-
 def get_account_transactions(account_id: int, limit:int=200) -> List[Dict[str,Any]]:
     """
     Combine income + expenses + ledger-affecting entries for a simple account ledger view.
@@ -287,7 +229,6 @@ def delete_account(account_id: int) -> bool:
         raise
     finally:
         sess.close()
-
 
 def settle_credit_card(card_account_id: int, from_account_id: int, amount: float, note: Optional[str] = None) -> bool:
     """
@@ -371,87 +312,3 @@ def get_income(limit: int = 1000, offset: int = 0) -> list[dict]:
     finally:
         sess.close()
 
-# -------------------------
-# Budget model helpers (CRUD)
-# -------------------------
-def set_budget(category: Optional[str], amount: float, period: str = 'monthly', active: bool = True) -> int:
-    """
-    Create or update a budget.
-    If a budget exists for the same category + period, update it (overwrite amount & active).
-    If category is None -> total budget for the period.
-    """
-    if amount <= 0:
-        raise ValueError("Budget amount must be positive")
-    period = period if period in ('monthly', 'yearly') else 'monthly'
-    sess = get_session()
-    try:
-        # find existing
-        q = sess.query(Budget).filter(func.coalesce(Budget.category, '') == (category or ''), Budget.period == period)
-        existing = q.first()
-        if existing:
-            existing.amount = float(amount)
-            existing.active = bool(active)
-            sess.commit()
-            return existing.id
-        b = Budget(category=category, amount=float(amount), period=period, active=bool(active))
-        sess.add(b)
-        sess.commit()
-        return b.id
-    except Exception:
-        sess.rollback()
-        raise
-    finally:
-        sess.close()
-
-def get_budgets(active_only: bool = False) -> list:
-    sess = get_session()
-    try:
-        q = sess.query(Budget).order_by(Budget.period, Budget.category.nullsfirst(), Budget.id.desc())
-        if active_only:
-            q = q.filter(Budget.active == True)
-        rows = q.all()
-        out = []
-        for r in rows:
-            out.append({
-                'id': r.id,
-                'category': r.category,
-                'amount': float(r.amount),
-                'period': r.period,
-                'active': bool(r.active),
-                'created_at': r.created_at.isoformat() if r.created_at else None
-            })
-        return out
-    finally:
-        sess.close()
-
-def get_budget_for_category(category: Optional[str], period: str = 'monthly'):
-    sess = get_session()
-    try:
-        r = sess.query(Budget).filter(func.coalesce(Budget.category, '') == (category or ''), Budget.period == period).first()
-        if not r:
-            return None
-        return {
-            'id': r.id,
-            'category': r.category,
-            'amount': float(r.amount),
-            'period': r.period,
-            'active': bool(r.active),
-            'created_at': r.created_at.isoformat() if r.created_at else None
-        }
-    finally:
-        sess.close()
-
-def delete_budget(budget_id: int) -> bool:
-    sess = get_session()
-    try:
-        b = sess.query(Budget).filter(Budget.id == budget_id).first()
-        if not b:
-            return False
-        sess.delete(b)
-        sess.commit()
-        return True
-    except Exception:
-        sess.rollback()
-        raise
-    finally:
-        sess.close()

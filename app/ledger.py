@@ -4,23 +4,81 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.db import get_session, LedgerPerson, Ledger, init_db
-from app.finance import adjust_balance, get_account_by_id
+# from app.finance import adjust_balance, get_account_by_id
 
 # ensure tables exist
-init_db()
+#init_db()
 
 # Helper to get column references safely (fallbacks)
 def _col_remaining_amount():
+    from app.db import Ledger
     return getattr(Ledger, 'remaining_amount', Ledger.amount)
 
 def _get_remaining_from_row(row):
     return float(getattr(row, 'remaining_amount', row.amount))
 
+def add_ledger_entry(account_id: Optional[int], amount: float, direction: str, party: str, date_val: date = None, due_date: Optional[date] = None, purpose: str = '', contact: str = '', notes: str = '', affects_balance: bool = False) -> int:
+    from app.db import Account, Ledger, get_session
+    """
+    Add ledger entry. If affects_balance True and account_id provided, adjusts account balance:
+      - direction == 'lent'  -> you gave money to someone => balance decreases by amount
+      - direction == 'borrowed' -> you borrowed money => balance increases by amount
+    """
+    if direction not in ('lent','borrowed'):
+        raise ValueError("direction must be 'lent' or 'borrowed'")
+    if date_val is None:
+        date_val = datetime.now().date()
+    sess = get_session()
+    try:
+        if account_id:
+            acct = sess.query(Account).filter(Account.id == account_id).first()
+            if not acct:
+                raise ValueError("Account not found")
+        entry = Ledger(account_id=account_id, amount=float(amount), direction=direction, party=party, date=date_val, due_date=due_date, purpose=purpose, contact=contact, notes=notes, affects_balance=bool(affects_balance))
+        sess.add(entry)
+        # adjust balance if requested
+        if affects_balance and account_id:
+            if direction == 'lent':
+                acct.balance = float(acct.balance or 0.0) - float(amount)
+            else:  # borrowed
+                acct.balance = float(acct.balance or 0.0) + float(amount)
+        sess.commit()
+        return entry.id
+    except Exception:
+        sess.rollback()
+        raise
+    finally:
+        sess.close()
+
+def get_ledger(account_id: Optional[int]=None, limit:int=200) -> List[Dict[str,Any]]:
+    from app.db import Ledger, get_session
+    sess = get_session()
+    try:
+        q = sess.query(Ledger).order_by(Ledger.date.desc())
+        if account_id:
+            q = q.filter(Ledger.account_id == account_id)
+        rows = q.limit(limit).all()
+        return [{
+            'id': r.id,
+            'date': r.date.isoformat(),
+            'amount': float(r.amount),
+            'direction': r.direction,
+            'party': r.party,
+            'due_date': r.due_date.isoformat() if r.due_date else None,
+            'purpose': r.purpose,
+            'contact': r.contact,
+            'notes': r.notes,
+            'affects_balance': bool(r.affects_balance),
+            'account_id': r.account_id
+        } for r in rows]
+    finally:
+        sess.close()
+
 # -----------------------
 # Person CRUD
 # -----------------------
 def create_person(name: str, contact: Optional[str] = None, note: Optional[str] = None) -> int:
+    from app.db import LedgerPerson, get_session
     name = name.strip()
     if not name:
         raise ValueError("Person name cannot be empty")
@@ -40,6 +98,7 @@ def create_person(name: str, contact: Optional[str] = None, note: Optional[str] 
         sess.close()
 
 def update_person(person_id: int, name: Optional[str]=None, contact: Optional[str]=None, note: Optional[str]=None) -> bool:
+    from app.db import LedgerPerson, get_session
     sess = get_session()
     try:
         p = sess.query(LedgerPerson).filter(LedgerPerson.id==person_id).first()
@@ -60,6 +119,7 @@ def update_person(person_id: int, name: Optional[str]=None, contact: Optional[st
         sess.close()
 
 def delete_person(person_id: int) -> bool:
+    from app.db import LedgerPerson, Ledger, get_session
     sess = get_session()
     try:
         p = sess.query(LedgerPerson).filter(LedgerPerson.id==person_id).first()
@@ -78,6 +138,7 @@ def delete_person(person_id: int) -> bool:
         sess.close()
 
 def list_persons() -> List[Dict[str,Any]]:
+    from app.db import LedgerPerson, get_session
     sess = get_session()
     try:
         rows = sess.query(LedgerPerson).order_by(LedgerPerson.name).all()
@@ -108,6 +169,8 @@ def add_entry_for_person(person_id: Optional[int],
                          affects_balance: bool = False,
                          account_id: Optional[int] = None,
                          interest_rate: Optional[float] = 0.0) -> int:
+    from app.db import Ledger, get_session
+    from app.finance import get_account_by_id, adjust_balance
     if direction not in ('lent','borrowed','transfer'):
         raise ValueError("direction must be 'lent' or 'borrowed' or 'transfer'")
 
@@ -160,6 +223,7 @@ def add_entry_for_person(person_id: Optional[int],
     return eid
 
 def get_entries_by_person(person_id: int, include_settled: bool = False, limit: int = 500) -> List[Dict[str,Any]]:
+    from app.db import Ledger, get_session
     sess = get_session()
     try:
         q = sess.query(Ledger).filter(Ledger.person_id == person_id)
@@ -189,6 +253,7 @@ def get_entries_by_person(person_id: int, include_settled: bool = False, limit: 
         sess.close()
 
 def mark_entry_settled(entry_id: int, settled: bool = True) -> bool:
+    from app.db import Ledger, get_session
     sess = get_session()
     try:
         e = sess.query(Ledger).filter(Ledger.id == entry_id).first()
@@ -208,6 +273,8 @@ def mark_entry_settled(entry_id: int, settled: bool = True) -> bool:
         sess.close()
 
 def settle_entry(entry_id: int, settle_amount: float, account_id: Optional[int] = None, note: Optional[str] = None) -> bool:
+    from app.db import Ledger, get_session
+    from app.finance import get_account_by_id, adjust_balance
     """
     Partially or fully settle a ledger entry.
     - settle_amount must be > 0 and <= remaining_amount.
@@ -272,6 +339,7 @@ def settle_entry(entry_id: int, settle_amount: float, account_id: Optional[int] 
 # Summaries & reminders
 # -----------------------
 def get_person_summary(person_id: int) -> Dict[str,Any]:
+    from app.db import Ledger, get_session
     sess = get_session()
     try:
         lent_total = sess.query(func.coalesce(func.sum(Ledger.amount),0.0)).filter(Ledger.person_id==person_id, Ledger.direction=='lent').scalar() or 0.0
@@ -298,6 +366,7 @@ def get_person_summary(person_id: int) -> Dict[str,Any]:
         sess.close()
 
 def overall_summary() -> Dict[str,Any]:
+    from app.db import Ledger, get_session
     sess = get_session()
     try:
         rem_col = _col_remaining_amount()
@@ -310,6 +379,7 @@ def overall_summary() -> Dict[str,Any]:
         sess.close()
 
 def due_reminders(days_ahead: int = 7) -> Dict[str, List[Dict[str,Any]]]:
+    from app.db import Ledger, get_session
     today = datetime.now().date()
     end = today + timedelta(days=days_ahead)
     sess = get_session()
@@ -336,6 +406,7 @@ def due_reminders(days_ahead: int = 7) -> Dict[str, List[Dict[str,Any]]]:
         sess.close()
 
 def person_leaderboard(limit:int=100) -> List[Dict[str,Any]]:
+    from app.db import LedgerPerson, get_session
     sess = get_session()
     try:
         persons = sess.query(LedgerPerson).all()
@@ -347,3 +418,5 @@ def person_leaderboard(limit:int=100) -> List[Dict[str,Any]]:
         return out[:limit]
     finally:
         sess.close()
+
+

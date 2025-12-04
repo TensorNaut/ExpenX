@@ -20,7 +20,8 @@ import pandas as pd
 import numpy as np
 
 from app.tracker import get_expenses
-from app.finance import get_income, get_accounts, get_budgets
+from app.finance import get_income, get_accounts
+from app.budget_engine import get_budgets
 from app.investments import list_investments
 
 # --------------------------------------------------

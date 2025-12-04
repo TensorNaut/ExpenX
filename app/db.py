@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKey, Index, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from app.schema_validator import validate_and_repair_schema
 
 # Config: DB path (env override supported)
 DB_PATH = os.getenv('EXPENX_DB', 'data/expenses.db')
@@ -178,38 +179,42 @@ Index('idx_investments_date', Investment.date)
 # -------------------------
 # Helpers
 # -------------------------
+
 def init_db(auto_repair_safe: bool = True):
-    """
-    Initialize DB (create missing tables), run schema validator,
-    and ensure default accounts exist.
-    - Does NOT import finance.create_account to avoid circular import.
-    - Uses local seed_default_accounts() which directly uses ORM.
-    """
-    from sqlalchemy import text
-    # run create_all (safe)
+    """Initialize DB schema and optionally validate and auto-repair."""
+    # 1. Create tables if not exist
     Base.metadata.create_all(bind=engine, checkfirst=True)
 
-    # Create migrations tracking table if missing
-    with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS applied_migrations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-        """))
-        conn.commit()
+    # 2. Ensure migrations table exists
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS migrations (
+                    id SERIAL PRIMARY KEY,
+                    filename TEXT NOT NULL,
+                    applied_at TIMESTAMP DEFAULT now()
+                );
+            """))
+            conn.commit()
+    except Exception as e:
+        print("⚠ Failed to ensure migrations table:", e)
 
-    # Schema validation / auto-repair (if available)
+    # 3. Schema validation
     try:
         from app.schema_validator import validate_and_repair_schema
         report = validate_and_repair_schema(engine, Base.metadata, auto_repair=auto_repair_safe)
-        print("\n🔍 Schema validator report:", report)
+        print("🔍 Schema validator report:", report)
     except Exception as e:
-        print("\n⚠ Schema validator error (ignored in Safe Mode):", e)
+        print("⚠ Schema validator error (ignored):", e)
 
-    # Ensure default accounts exist (use local helper)
-    seed_default_accounts()
+    # 4. Seed default accounts using built-in helper (NO finance imports!)
+    try:
+        created = seed_default_accounts()
+        if created:
+            print("✔ Default accounts created:", created)
+    except Exception as e:
+        print("⚠ Failed to seed default accounts:", e)
+
 
 
 def get_session():
@@ -221,32 +226,37 @@ def get_session():
 
 def seed_default_accounts():
     """
-    Ensure default accounts exist: Main (bank), Cash (cash), Credit Card (card).
-    Safe to call multiple times; it will not duplicate names.
+    Create Main, Cash, and Credit Card accounts ONLY if missing.
+    (Safe for circular imports because it uses Account directly.)
     """
-    sess = get_session()
+    sess = SessionLocal()
     try:
         existing = {a.name.lower(): a for a in sess.query(Account).all()}
         created = []
-        if 'main' not in existing:
-            a = Account(name='Main', currency='INR', balance=0.0, kind='bank')
+
+        if "main" not in existing:
+            a = Account(name="Main", currency="INR", balance=0.0, kind="bank")
             sess.add(a); sess.flush()
-            created.append(('Main', a.id))
-        if 'cash' not in existing:
-            b = Account(name='Cash', currency='INR', balance=0.0, kind='cash')
-            sess.add(b); sess.flush()
-            created.append(('Cash', b.id))
-        if 'credit card' not in existing and 'creditcard' not in existing:
-            c = Account(name='Credit Card', currency='INR', balance=0.0, kind='card')
-            sess.add(c); sess.flush()
-            created.append(('Credit Card', c.id))
-        if created:
-            sess.commit()
-        else:
-            sess.rollback()
+            created.append(("Main", a.id))
+
+        if "cash" not in existing:
+            a = Account(name="Cash", currency="INR", balance=0.0, kind="cash")
+            sess.add(a); sess.flush()
+            created.append(("Cash", a.id))
+
+        if "credit card" not in existing:
+            a = Account(name="Credit Card", currency="INR", balance=0.0, kind="card")
+            sess.add(a); sess.flush()
+            created.append(("Credit Card", a.id))
+
+        sess.commit()
         return created
-    except Exception:
+
+    except Exception as e:
         sess.rollback()
-        raise
+        print("⚠ Account seeding failed:", e)
+        return []
+
     finally:
         sess.close()
+

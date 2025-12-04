@@ -5,10 +5,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.db import get_session, Investment, InvestmentSettlement, init_db
-from app.finance import get_account_by_id, adjust_balance
+# from app.finance import get_account_by_id, adjust_balance
 
 # ensure metadata / tables exist
-init_db()
+# init_db()
 
 # unit mapping
 UNIT_LABELS = {
@@ -51,6 +51,7 @@ def create_investment(amount: float,
                       quantity: Optional[float] = None,
                       purchase_price_per_unit: Optional[float] = None,
                       currency: str = "INR") -> int:
+    from app.finance import get_account_by_id, adjust_balance
     if date_val is None:
         date_val = datetime.now().date()
     unit_label, has_unit = _unit_label_for_type(inv_type)
@@ -167,6 +168,7 @@ def get_investment_by_id(investment_id: int) -> Optional[Dict[str,Any]]:
 # Redeem (partial / full) — ORM, updates quantity & current_value, creates InvestmentSettlement rows
 # -------------------------
 def redeem_investment(investment_id: int, amount: Optional[float] = None, quantity: Optional[float] = None, credit_account: Optional[int] = None, note: Optional[str] = None) -> int:
+    from app.finance import get_account_by_id, adjust_balance
     """
     Redeem part/all of an investment. Either specify amount (currency) or quantity (units).
     Decreases principal_remaining, decreases quantity (if quantity-based), updates current_value, creates settlement row, adjusts account.
