@@ -7,6 +7,8 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from datetime import timedelta
 import numpy as np
+from datetime import date
+
 
 from app.tracker import (
     load_model, predict_category,
@@ -59,9 +61,17 @@ from app.visualizer import (
     get_dashboard_data
 )
 
+from app.autopay import (
+    create_rule, get_rules, update_rule,
+    delete_rule, run_due_autopays
+)
+
+
 from app.visual_reports import plot_monthly_stacked
 from app.report_generator import generate_overall_report
 from app.db import get_session, engine, Base
+from app.db import AutopayExecution
+
 
 
 # -----------------------------------------------------------
@@ -1622,6 +1632,141 @@ elif choice == "Accounts":
                         except Exception as ex:
                             st.error(f"Error deleting account: {ex}")
 
+    # ============================================================
+    #                    AUTOPAY SECTION
+    # ============================================================
+
+    st.markdown("### ⚡ Autopay - Automated Payments")
+
+    # Load rules
+    rules = get_rules(active_only=False)
+
+    # ---------------- ADD NEW AUTOPAY RULE ----------------
+    st.markdown("#### ➕ Add New Autopay Rule")
+
+    autopay_container = st.container(border=True)
+
+    with autopay_container:
+        ap_name = st.text_input("Autopay Name")
+        ap_amount = st.number_input("Amount (₹)", min_value=1.0, step=1.0)
+        ap_category = st.text_input("Category (optional)")
+        ap_description = st.text_area("Description", placeholder="Optional description")
+
+        ap_freq = st.selectbox(
+            "Frequency",
+            ["monthly", "weekly", "daily", "interval", "once"]
+        )
+
+        colA, colB = st.columns(2)
+        next_run = colA.date_input("Next Run Date", date.today())
+
+        day_of_month = None
+        day_of_week = None
+        interval_days = None
+
+        if ap_freq == "monthly":
+            day_of_month = colB.number_input("Day of Month (1–31)", min_value=1, max_value=31, value=next_run.day)
+
+        elif ap_freq == "weekly":
+            day_of_week = colB.selectbox("Day of Week", ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+            day_of_week = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].index(day_of_week)
+
+        elif ap_freq == "interval":
+            interval_days = colB.number_input("Interval Days", min_value=1, max_value=365, value=30)
+
+        # Accounts list
+        acc_list = get_accounts()
+        acc_options = {f"{a['name']} (₹{a['balance']:.2f})": a['id'] for a in acc_list}
+        ap_account = st.selectbox("Deduct From Account", list(acc_options.keys()))
+
+        if st.button("Create Autopay Rule"):
+            create_rule(
+                name=ap_name,
+                account_id=acc_options[ap_account],
+                amount=ap_amount,
+                category=ap_category,
+                description=ap_description,
+                frequency=ap_freq,
+                day_of_month=day_of_month,
+                day_of_week=day_of_week,
+                interval_days=interval_days,
+                next_run_date=next_run
+            )
+            st.success("Autopay Rule Created!")
+            st.rerun()
+
+
+    # ---------------- EXISTING RULES ----------------
+    st.markdown("### 📋 Existing Autopay Rules")
+
+    if not rules:
+        st.info("No autopay rules added yet.")
+    else:
+        for rule in rules:
+            with st.expander(f"⚙ {rule['name']} — ₹{rule['amount']}  | Next Run: {rule['next_run_date']}"):
+                st.write(f"**Category:** {rule['category']}")
+                st.write(f"**Account ID:** {rule['account_id']}")
+                st.write(f"**Active:** {'Yes' if rule['active'] else 'No'}")
+                st.write(f"**Paused Until:** {rule['paused_until'] or 'Not Paused'}")
+
+                col1, col2, col3 = st.columns(3)
+
+                # Pause / Resume
+                if rule["active"]:
+                    if col1.button(f"Pause #{rule['id']}"):
+                        update_rule(rule['id'], active=False)
+                        st.rerun()
+                else:
+                    if col1.button(f"Resume #{rule['id']}"):
+                        update_rule(rule['id'], active=True)
+                        st.rerun()
+
+                # Edit Amount
+                new_amt = col2.number_input(
+                    f"New Amount for #{rule['id']}",
+                    min_value=1.0,
+                    step=1.0,
+                    value=rule["amount"],
+                    key=f"edit_amt_{rule['id']}"
+                )
+                if col2.button(f"Update Amount #{rule['id']}"):
+                    update_rule(rule['id'], amount=new_amt)
+                    st.success("Updated!")
+                    st.rerun()
+
+                # Delete Rule
+                if col3.button(f"Delete #{rule['id']}"):
+                    delete_rule(rule['id'])
+                    st.error("Rule Deleted!")
+                    st.rerun()
+
+
+    # ---------------- AUTOPAY HISTORY ----------------
+    st.markdown("### 🧾 Autopay History Logs")
+
+    sess = get_session()
+    logs = sess.query(AutopayExecution).order_by(AutopayExecution.run_date.desc()).limit(50).all()
+    sess.close()
+
+    if not logs:
+        st.info("No autopay history found.")
+    else:
+        for log in logs:
+            color = "🟢" if log.status == "success" else "🔴"
+            st.write(
+                f"{color} **{log.run_date}** — ₹{log.amount} — Status: {log.status}"
+                + (f" — Reason: {log.failure_reason}" if log.failure_reason else "")
+            )
+
+
+    # ---------------- RUN AUTOPAY BUTTON ----------------
+    if st.button("⚡ Run All Due Autopays"):
+        out = run_due_autopays()
+        st.json(out)
+        st.success("Autopay execution completed.")
+        st.rerun()
+
+
 
 # ===========================================================
 # TRANSFER
@@ -1918,7 +2063,7 @@ elif choice == "Investments":
                     purchase_price_per_unit=purchase_price if purchase_price and purchase_price>0 else None
                 )
                 st.success(f"Investment created (id {inv_id}).")
-                st.experimental_rerun()
+                st.rerun()
             except Exception as ex:
                 st.error(f"Failed to create investment: {ex}")
 
@@ -1973,7 +2118,7 @@ elif choice == "Investments":
                                 continue
                             settlement_id = redeem_investment(inv['id'], amount=redeem_amount, credit_account=credit_id, note=note)
                         st.success(f"Redeemed (settlement id {settlement_id}).")
-                        st.experimental_rerun()
+                        st.rerun()
                     except Exception as ex:
                         st.error(f"Failed to redeem: {ex}")
 

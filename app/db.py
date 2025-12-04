@@ -166,6 +166,52 @@ class Budget(Base):
     active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=func.now())
 
+
+class AutopayRule(Base):
+    __tablename__ = 'autopay_rules'
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(256), nullable=False)
+    description = Column(Text, nullable=True)
+    account_id = Column(Integer, ForeignKey('accounts.id'), nullable=True)  # source account
+    amount = Column(Float, nullable=False)
+    category = Column(String(128), nullable=True)      # category to assign for the generated expense
+    currency = Column(String(8), default='INR')
+
+    # schedule
+    frequency = Column(String(32), nullable=False, default='monthly')  # 'monthly','weekly','daily','interval','once'
+    day_of_month = Column(Integer, nullable=True)   # for monthly
+    day_of_week = Column(Integer, nullable=True)    # for weekly (0=Mon..6=Sun)
+    interval_days = Column(Integer, nullable=True)  # for interval
+    next_run_date = Column(Date, nullable=False)
+    last_run_date = Column(Date, nullable=True)
+
+    # control
+    active = Column(Boolean, default=True)
+    paused_until = Column(Date, nullable=True)  # optional pause
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    # relationship helpers (optional)
+    executions = relationship("AutopayExecution", back_populates="rule", cascade="all, delete-orphan")
+
+class AutopayExecution(Base):
+    __tablename__ = 'autopay_executions'
+    id = Column(Integer, primary_key=True, index=True)
+    rule_id = Column(Integer, ForeignKey('autopay_rules.id', ondelete='CASCADE'), nullable=False)
+    run_date = Column(Date, nullable=False)
+    amount = Column(Float, nullable=False)
+    status = Column(String(32), nullable=False)  # 'success' | 'failed'
+    failure_reason = Column(Text, nullable=True)
+
+    # optional links to created records (expense/ledger)
+    expense_id = Column(Integer, ForeignKey('expenses.id'), nullable=True)
+    ledger_id = Column(Integer, ForeignKey('ledger.id'), nullable=True)
+
+    created_at = Column(DateTime, default=func.now())
+
+    rule = relationship("AutopayRule", back_populates="executions")
+
+
 # -------------------------
 # Indexes
 # -------------------------
