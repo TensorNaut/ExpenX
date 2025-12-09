@@ -5,8 +5,8 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime, date, timedelta
-#from app.db import engine, get_session, Budget
-from sqlalchemy import text
+from app.db import engine, get_session, Budget
+from sqlalchemy import text, func
 from typing import Optional, List, Dict, Any
 
 
@@ -382,7 +382,11 @@ def load_budgets():
     from app.db import engine
     """Return budgets in normalized dict format used by both tabs."""
     with engine.connect() as conn:
-        rows = conn.execute(text("SELECT * FROM budgets WHERE active = 1")).fetchall()
+        rows = conn.execute(
+            text("SELECT * FROM budgets WHERE active = :active"),
+            {"active": True}
+            ).fetchall()
+
 
     if not rows:
         return {"total_budget": 0, "categories": []}
@@ -416,14 +420,14 @@ def save_category_budget(category: str, amount: float):
         # deactivate existing entry
         conn.execute(text("""
             UPDATE budgets 
-            SET active = 0 
+            SET active = true 
             WHERE category = :c
         """), {"c": category})
 
         # insert new
         conn.execute(text("""
             INSERT INTO budgets (category, amount, period, active)
-            VALUES (:c, :a, 'monthly', 1)
+            VALUES (:c, :a, 'monthly', TRUE)
         """), {"c": category, "a": amount})
 
         conn.commit()

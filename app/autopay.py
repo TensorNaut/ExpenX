@@ -142,7 +142,6 @@ def _create_expense_and_ledger(sess: Session, rule: AutopayRule, exec_date: date
     Create expense and ledger entries in the provided session.
     This function assumes session open and will not commit — caller handles commit/rollback.
     """
-    # create Expense (use provided category)
     exp = Expense(
         date=exec_date,
         amount=float(rule.amount),
@@ -156,7 +155,6 @@ def _create_expense_and_ledger(sess: Session, rule: AutopayRule, exec_date: date
     sess.add(exp)
     sess.flush()  # get exp.id
 
-    # create Ledger trace entry
     led = Ledger(
         account_id=rule.account_id,
         date=exec_date,
@@ -171,6 +169,7 @@ def _create_expense_and_ledger(sess: Session, rule: AutopayRule, exec_date: date
     sess.flush()  # get led.id
 
     return exp.id, led.id
+
 
 def run_due_autopays(today: Optional[date] = None, dry_run: bool = False) -> Dict[str,Any]:
     """
@@ -196,12 +195,10 @@ def run_due_autopays(today: Optional[date] = None, dry_run: bool = False) -> Dic
                 report['skipped'].append({'rule_id': rule.id, 'reason': 'paused'})
                 continue
 
-            # do execution in a nested transaction
             try:
-                # re-check account & balance
+                # lock account row in current session
                 acct = sess.query(Account).filter(Account.id == rule.account_id).with_for_update().first()
                 if not acct:
-                    # log failure
                     exec_row = AutopayExecution(
                         rule_id=rule.id, run_date=today,
                         amount=rule.amount, status='failed',
@@ -212,7 +209,7 @@ def run_due_autopays(today: Optional[date] = None, dry_run: bool = False) -> Dic
                     report['errors'].append({'rule_id': rule.id, 'error': 'account_not_found'})
                     continue
 
-                # check funds (we do not fallback)
+                # check funds (no fallback)
                 if float(acct.balance or 0.0) + 1e-9 < float(rule.amount):
                     exec_row = AutopayExecution(
                         rule_id=rule.id, run_date=today,
@@ -224,50 +221,45 @@ def run_due_autopays(today: Optional[date] = None, dry_run: bool = False) -> Dic
                     report['errors'].append({'rule_id': rule.id, 'error': 'insufficient_funds'})
                     continue
 
-                # perform debit using finance.adjust_balance (local import to avoid cycle)
-                from app.finance import adjust_balance
-                # debit
-                ok = adjust_balance(rule.account_id, -float(rule.amount))
-                if not ok:
-                    raise RuntimeError("adjust_balance failed")
+                # --- perform debit using the same session (avoid cross-session lock) ---
+                # reduce account balance
+                acct.balance = float(acct.balance or 0.0) - float(rule.amount)
 
-                # create expense + ledger
+                # create expense + ledger using same session
                 exp_id, led_id = _create_expense_and_ledger(sess, rule, today)
 
-                # record execution
+                # create execution log row
                 exec_row = AutopayExecution(
                     rule_id=rule.id, run_date=today,
                     amount=rule.amount, status='success',
-                    failure_reason=None,
-                    expense_id=exp_id,
-                    ledger_id=led_id
+                    expense_id=exp_id, ledger_id=led_id
                 )
                 sess.add(exec_row)
 
-                # update rule last_run_date and compute next
+                # update rule next_run_date and last_run_date
                 rule.last_run_date = today
-                # compute and set next_run_date
-                next_run = _next_run_for_rule(rule, from_date=rule.next_run_date or today)
-                if next_run is None:
-                    # one-time rule: deactivate
-                    rule.active = False
-                    rule.next_run_date = None
-                else:
-                    rule.next_run_date = next_run
+                nxt = _next_run_for_rule(rule, from_date=rule.next_run_date or today)
+                rule.next_run_date = nxt
 
+                # commit all changes for this rule
                 sess.commit()
-                report['run'].append({'rule_id': rule.id, 'expense_id': exp_id, 'ledger_id': led_id})
 
-            except Exception as e_inner:
+                report['run'].append({'rule_id': rule.id, 'expense_id': exp_id, 'ledger_id': led_id})
+            except Exception as ex:
                 sess.rollback()
+                # log execution failure (persist failure if possible)
                 try:
-                    # log failure row (best-effort)
-                    fail = AutopayExecution(rule_id=rule.id, run_date=today, amount=rule.amount, status='failed', failure_reason=str(e_inner))
-                    sess.add(fail)
+                    exec_row = AutopayExecution(
+                        rule_id=rule.id, run_date=today,
+                        amount=rule.amount, status='failed',
+                        failure_reason=str(ex)
+                    )
+                    sess.add(exec_row)
                     sess.commit()
                 except Exception:
                     sess.rollback()
-                report['errors'].append({'rule_id': rule.id, 'error': str(e_inner)})
+                report['errors'].append({'rule_id': rule.id, 'error': str(ex)})
+                continue
 
         return report
     finally:

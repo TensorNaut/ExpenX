@@ -4,11 +4,10 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.db import get_session, Investment, InvestmentSettlement, init_db
+from app.db import get_session, Investment, InvestmentSettlement
 # from app.finance import get_account_by_id, adjust_balance
 
 # ensure metadata / tables exist
-# init_db()
 
 # unit mapping
 UNIT_LABELS = {

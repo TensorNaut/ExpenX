@@ -16,3 +16,15 @@ OCR/
 data/db_backups/
 logs/
 *.sql
+alembic.ini
+migrations/
+alembic/versions/
+alembic/env.py
+alembic/script.py.mako
+alembic/README.md
+.vscode/settings.json
+web/index.html
+web/styles.css
+web/script.js
+web/logo.png
+

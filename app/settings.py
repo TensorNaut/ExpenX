@@ -15,15 +15,17 @@ DEFAULTS = {
 
 def ensure_settings_table():
     """Make sure settings table exists (safe to call repeatedly)."""
+
     sql = """
     CREATE TABLE IF NOT EXISTS settings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         key TEXT NOT NULL UNIQUE,
         value TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
+
     with engine.connect() as conn:
         conn.execute(text(sql))
         conn.commit()

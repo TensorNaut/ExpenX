@@ -6,7 +6,7 @@ import pickle
 from sentence_transformers import SentenceTransformer
 import pandas as pd
 
-from app.db import get_session, Expense, engine, init_db
+from app.db import get_session, Expense, engine
 # from app.finance import adjust_balance, get_accounts
 from sqlalchemy import text
 
@@ -40,7 +40,6 @@ def load_model(model_path=DEFAULT_MODEL_PATH, clf_path=DEFAULT_CLF_PATH) -> bool
     except Exception:
         return False
 
-# init_db()
 
 def predict_category(description: str) -> Optional[str]:
     if not description or not description.strip():
@@ -149,11 +148,32 @@ def add_expense(amount: float,
                 adjust_balance(resolved_account_id, float(amount))
     return eid
 
+
 def get_expenses(limit: int = 1000, offset: int = 0) -> pd.DataFrame:
-    from app.db import Expense, get_session, engine
-    query = "SELECT id, date as Date, amount as Amount, description as Description, category as Category, source, payment_source, account_id, ocr_confidence, created_at FROM expenses ORDER BY date DESC, id DESC LIMIT ? OFFSET ?"
-    df = pd.read_sql_query(query, engine, params=(limit, offset), parse_dates=['Date','created_at'])
+    # Ensure ints (prevent injection if accidentally passed strings)
+    limit = int(limit or 0)
+    offset = int(offset or 0)
+
+    query = f"""
+        SELECT id,
+               date AS "Date",
+               amount AS "Amount",
+               description AS "Description",
+               category AS "Category",
+               source,
+               payment_source,
+               account_id,
+               ocr_confidence,
+               created_at
+        FROM expenses
+        ORDER BY date DESC, id DESC
+        LIMIT {limit} OFFSET {offset}
+    """
+    # Using format interpolation for integers is acceptable here;
+    # pandas will hand the SQL to SQLAlchemy / DBAPI which will accept numeric literals.
+    df = pd.read_sql_query(query, engine, parse_dates=['Date', 'created_at'])
     return df
+
 
 def get_expense_by_id(eid: int) -> Optional[Dict[str, Any]]:
     from app.db import Expense, get_session, engine

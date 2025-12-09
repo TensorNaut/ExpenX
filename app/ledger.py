@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 # from app.finance import adjust_balance, get_account_by_id
 
 # ensure tables exist
-#init_db()
 
 # Helper to get column references safely (fallbacks)
 def _col_remaining_amount():

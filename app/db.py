@@ -27,6 +27,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 from sqlalchemy.exc import OperationalError
 
+import threading
+
 # ---------------------------------------------------------------------
 # DATABASE CONFIG
 # ---------------------------------------------------------------------
@@ -125,7 +127,7 @@ class Expense(Base):
     account_id = Column(Integer, ForeignKey("accounts.id", ondelete="SET NULL"))
 
     account = relationship("Account", back_populates="expenses")
-
+    autopay_executions = relationship("AutopayExecution", backref="expense", cascade="all, delete-orphan", passive_deletes=True)
 
 # ====== INCOME ========================================================
 class Income(Base):
@@ -300,7 +302,12 @@ class AutopayExecution(Base):
     amount = Column(Float, nullable=False)
     status = Column(String(32), nullable=False)
     failure_reason = Column(Text)
-    expense_id = Column(Integer, ForeignKey("expenses.id"))
+    expense_id = Column(
+        Integer,
+        ForeignKey("expenses.id", ondelete="CASCADE"),
+        nullable=True
+    )
+
     ledger_id = Column(Integer, ForeignKey("ledger.id"))
     created_at = Column(DateTime, default=now)
 
@@ -367,25 +374,58 @@ def seed_default_accounts() -> List[Tuple[str, int]]:
         sess.close()
 
 
-def init_db(auto_repair_safe: bool = True):
-    """Initialize DB, create tables, ensure migrations table & default accounts."""
-    Base.metadata.create_all(bind=engine, checkfirst=True)
+# --------------------------------------------------------------------------------
+# INTERNAL LOCK: prevents parallel init_db calls during Streamlit reruns
+# --------------------------------------------------------------------------------
+_init_lock = threading.Lock()
+_init_done = False  # process-level guard, does NOT use session_state
 
-    # Create migrations table
-    try:
-        with engine.connect() as conn:
-            _create_migrations_table_if_missing(conn)
-            conn.commit()
-    except Exception as e:
-        print("⚠ migrations table creation failed:", e)
+def init_db(auto_repair_safe=False):
+    """
+    Production-safe DB initializer.
+    - Creates ORM tables ONLY (metadata.create_all)
+    - Never runs repairs automatically unless explicitly requested
+    - Never seeds data here (bootstrap handles that)
+    - Guaranteed to run ONCE per Python process (thread-locked)
+    """
 
-    # Default accounts
-    try:
-        created = seed_default_accounts()
-        if created:
-            print("✔ Default accounts created:", created)
-    except Exception as e:
-        print("⚠ seed_default_accounts failed:", e)
+    global _init_done
+    if _init_done:
+        return
+
+    with _init_lock:
+        if _init_done:
+            return  # double-check inside lock
+
+        print("[DB] Initializing database…")
+
+        # ----------------------------------------------------------------------
+        # 1. Create all ORM tables (safe for repeated calls)
+        # ----------------------------------------------------------------------
+        try:
+            Base.metadata.create_all(engine)
+        except OperationalError as e:
+            print("[DB] ERROR during metadata.create_all:", e)
+            raise
+
+        # ----------------------------------------------------------------------
+        # 2. Optional: run schema repair ONLY when explicitly requested
+        # ----------------------------------------------------------------------
+        if auto_repair_safe:
+            try:
+                from app.schema_validator import validate_and_repair_schema
+                print("[DB] Running optional schema repair…")
+                validate_and_repair_schema(auto_repair=True)
+            except Exception as ex:
+                print("[DB] WARNING: schema repair failed:", ex)
+                # Non-fatal in production
+
+        # ----------------------------------------------------------------------
+        # 3. Mark initialization complete
+        # ----------------------------------------------------------------------
+        print("[DB] init_db complete.")
+        _init_done = True
+
 
 
 # ---------------------------------------------------------------------

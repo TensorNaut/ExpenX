@@ -1,10 +1,11 @@
 # app/finance.py
 from datetime import datetime, date
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from sqlalchemy.orm import Session
 from app.db import get_session, Account, Income, Ledger, Expense, Budget
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
+
 
 def create_account(name: str, initial_balance: float = 0.0, currency: str = 'INR', kind: str = 'bank') -> int:
     """
@@ -80,27 +81,39 @@ def get_account_by_name(name: str) -> Optional[Dict[str,Any]]:
         }
     finally:
         sess.close()
+    
 
-def adjust_balance(account_id: int, delta: float) -> bool:
+def adjust_balance(account_id: int, delta: float, sess: Optional[Session] = None) -> bool:
     """
     Adjust balance by delta. For bank/cash: positive increases assets.
     For card: we use balance field to store outstanding amount (positive = owed).
-      - For card account: to add an expense, call adjust_balance(card_id, +amount)
-      - To pay down card: adjust_balance(card_id, -amount)
+
+    If `sess` is provided, the update happens in that session (no commit/close).
+    If `sess` is None, this function manages its own session (commit/close).
     """
-    sess = get_session()
+    own_session = False
+    if sess is None:
+        sess = get_session()
+        own_session = True
+
     try:
         acct = sess.query(Account).filter(Account.id == account_id).with_for_update().first()
         if not acct:
+            if own_session:
+                sess.rollback()
             return False
         acct.balance = float(acct.balance or 0.0) + float(delta)
-        sess.commit()
+        # commit only if we own the session
+        if own_session:
+            sess.commit()
         return True
     except Exception:
-        sess.rollback()
+        if own_session:
+            sess.rollback()
         raise
     finally:
-        sess.close()
+        if own_session:
+            sess.close()
 
 def add_income(account_id: int, amount: float, source: str, date_val: date = None, description: str = '') -> int:
     if date_val is None:

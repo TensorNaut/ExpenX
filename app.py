@@ -1,6 +1,35 @@
 # app.py
 import streamlit as st
 
+
+# -----------------------------------------------------------
+# APP CONFIG
+# -----------------------------------------------------------
+st.set_page_config(page_title="💸 ExpenX - Expense Manager", layout="centered")
+st.title("💸 ExpenX - Expense Manager")
+
+# -----------------------------------------------------------
+
+from app.bootstrap import bootstrap
+
+# Run bootstrap exactly once per browser session (session_state persists across reruns)
+if "bootstrap_done" not in st.session_state:
+    try:
+        with st.spinner("Initializing ExpenX..."):
+            # NOTE: we do NOT request auto_repair here to avoid heavy schema operations on web startup.
+            # If you *want* to run SQLite auto-repair, call bootstrap(auto_repair_safe=True) from CLI.
+            bootstrap(auto_repair_safe=False)
+        st.session_state.bootstrap_done = True
+    except Exception as e:
+        # Show a friendly error and stop execution so Streamlit doesn't keep rerunning bootstrap.
+        st.error(f"Bootstrap failed: {e}")
+        # Optional: print stack to console for debugging
+        import traceback as _tb
+        _tb.print_exc()
+        st.stop()
+
+# -----------------------------------------------------------
+
 from datetime import date as dt_date
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -71,38 +100,10 @@ from app.visual_reports import plot_monthly_stacked
 from app.report_generator import generate_overall_report
 from app.db import get_session, engine, Base
 from app.db import AutopayExecution
-
-
-
-# -----------------------------------------------------------
-# DATABASE INITIALIZATION & SCHEMA VALIDATION
-# -----------------------------------------------------------
+from app.db import DB_URL
 
 from app.schema_validator import validate_and_repair_schema
 
-# def init_db(auto_repair: bool = False):
-#     # existing init code: create tables if missing
-#     Base.metadata.create_all(bind=engine, checkfirst=True)
-
-#     # new: validate schema & optionally auto-repair mismatches
-#     try:
-#         # pass engine and metadata to validator
-#         report = validate_and_repair_schema(engine, Base.metadata, auto_repair=auto_repair)
-#         # optionally log the report, or keep simple print
-#         # logger.info(report)
-#     except Exception as e:
-#         # don't crash the entire app (but log it)
-#         import logging
-#         logging.getLogger("schema_validator").exception("Schema validation failed: %s", e)
-
-from app.bootstrap import bootstrap
-bootstrap()
-
-# -----------------------------------------------------------
-# APP CONFIG
-# -----------------------------------------------------------
-st.set_page_config(page_title="💸 ExpenX - Expense Manager", layout="centered")
-st.title("💸 ExpenX - Expense Manager")
 
 # -----------------------------------------------------------
 # SESSION STATE HANDLER
@@ -147,6 +148,8 @@ for name, kind in needed_defaults:
 
 # Reload accounts after ensuring defaults
 accounts_now = get_accounts()
+
+st.sidebar.write("DB:", DB_URL) # show DB URL for debugging remove during production
 
 # -----------------------------------------------------------
 # MENU
