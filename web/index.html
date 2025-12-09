@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ExpenX - Expense Manager</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="brand">
+                <img src="logo.png" alt="ExpenX Logo" class="brand-logo" style="height: 45px; width: auto;">
+            </div>
+
+            <ul class="nav-menu">
+                <li class="nav-item active" onclick="switchTab('dashboard', this)">
+                    <span>📊</span> Analytics
+                </li>
+                <li class="nav-item" onclick="switchTab('add-expense', this)">
+                    <span>➕</span> Add Expense
+                </li>
+                <li class="nav-item" onclick="switchTab('view-expenses', this)">
+                    <span>📋</span> View Expenses
+                </li>
+                <li class="nav-item" onclick="switchTab('income', this)">
+                    <span>💰</span> Income
+                </li>
+                <li class="nav-item" onclick="switchTab('accounts', this)">
+                    <span>💳</span> Accounts
+                </li>
+                <li class="nav-item" onclick="switchTab('ledger', this)">
+                    <span>📒</span> Ledger
+                </li>
+                <li class="nav-item" onclick="alert('Feature coming soon!')">
+                    <span>📈</span> Investments
+                </li>
+            </ul>
+
+            <div class="user-profile">
+                <div class="avatar"></div>
+                <div style="font-size: 0.9rem;">
+                    <div style="font-weight: 600;">Tushar</div>
+                    <div style="color: var(--text-muted); font-size: 0.75rem;">Premium User</div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div class="top-bar">
+                <h1 id="page-title" class="page-title">Dashboard</h1>
+                <div class="actions">
+                    <button class="btn btn-ghost">🔔</button>
+                    <button class="btn btn-primary" onclick="switchTab('add-expense')">New Entry</button>
+                </div>
+            </div>
+
+            <div class="content-area">
+
+                <!-- SECTION: DASHBOARD -->
+                <div id="section-dashboard" class="fade-in">
+                    <!-- Stats Grid -->
+                    <div class="dashboard-grid">
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Total Income</span>
+                                <div class="stat-icon">💰</div>
+                            </div>
+                            <div class="stat-value">₹1,25,000</div>
+                            <div class="stat-trend trend-down">
+                                <span>↑ 12%</span> vs last month
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Total Expense</span>
+                                <div class="stat-icon"
+                                    style="background: rgba(255,123,107,0.1); color: var(--accent-red)">📉</div>
+                            </div>
+                            <div class="stat-value" style="color: var(--accent-red)">₹45,200</div>
+                            <div class="stat-trend trend-up">
+                                <span>↑ 5%</span> vs last month
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Net Savings</span>
+                                <div class="stat-icon"
+                                    style="background: rgba(56,189,248,0.1); color: var(--accent-blue)">🛡️</div>
+                            </div>
+                            <div class="stat-value">₹79,800</div>
+                            <div class="stat-trend trend-down" style="color: var(--accent-blue)">
+                                Healthy
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-header">
+                                <span class="stat-title">Budget Remaining</span>
+                                <div class="stat-icon">🎯</div>
+                            </div>
+                            <div class="stat-value">₹4,800</div>
+                            <div class="stat-trend">
+                                <span style="font-size: 0.8rem; color: var(--text-muted)">of ₹50k Budget</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Charts Area -->
+                    <div class="charts-section">
+                        <div class="chart-card">
+                            <div class="card-header">
+                                <div class="card-title">Daily Spending Trend</div>
+                                <select style="background:transparent; color:white; border:none;">
+                                    <option>This Month</option>
+                                </select>
+                            </div>
+                            <canvas id="spendChart"></canvas>
+                        </div>
+                        <div class="chart-card">
+                            <div class="card-header">
+                                <div class="card-title">Category Split</div>
+                            </div>
+                            <canvas id="categoryChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SECTION: ADD EXPENSE -->
+                <div id="section-add-expense" class="hidden fade-in">
+                    <div class="form-container">
+                        <h2 style="margin-bottom: 2rem;">Add New Expense</h2>
+                        <form id="addExpenseForm" onsubmit="handleFormSubmit(event)">
+                            <div class="form-group">
+                                <label class="form-label">Date</label>
+                                <input type="date" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Description</label>
+                                <input type="text" class="form-control" placeholder="e.g. Uber to Office" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Amount (₹)</label>
+                                <input type="number" class="form-control" placeholder="0.00" required>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Category</label>
+                                <select class="form-control">
+                                    <option>Food</option>
+                                    <option>Transport</option>
+                                    <option>Rent</option>
+                                    <option>Entertainment</option>
+                                    <option>Shopping</option>
+                                    <option>Other</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Payment Method</label>
+                                <select class="form-control">
+                                    <option>Credit Card</option>
+                                    <option>Cash</option>
+                                    <option>UPI</option>
+                                </select>
+                            </div>
+                            <button type="submit" class="btn btn-primary"
+                                style="width:100%; justify-content:center;">Add Expense</button>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- SECTION: VIEW EXPENSES -->
+                <div id="section-view-expenses" class="hidden fade-in">
+                    <div class="table-container">
+                        <div class="table-header">
+                            <h3 class="card-title">Recent Transactions</h3>
+                            <button class="btn btn-ghost" style="font-size:0.8rem">Download CSV</button>
+                        </div>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Date</th>
+                                    <th>Description</th>
+                                    <th>Category</th>
+                                    <th>Account</th>
+                                    <th style="text-align:right">Amount</th>
+                                </tr>
+                            </thead>
+                            <tbody id="expenseTableBody">
+                                <!-- Populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- SECTION: INCOME (Placeholder) -->
+                <div id="section-income" class="hidden fade-in">
+                    <div style="text-align:center; margin-top: 4rem; color: var(--text-muted);">
+                        <h2>Income Management</h2>
+                        <p>This section will allow adding and viewing income sources.</p>
+                    </div>
+                </div>
+
+                <!-- SECTION: ACCOUNTS (Placeholder) -->
+                <div id="section-accounts" class="hidden fade-in">
+                    <div style="text-align:center; margin-top: 4rem; color: var(--text-muted);">
+                        <h2>Accounts Overview</h2>
+                        <p>Manage Bank Accounts, Credit Cards, and Cash.</p>
+                    </div>
+                </div>
+
+                <!-- SECTION: LEDGER (Placeholder) -->
+                <div id="section-ledger" class="hidden fade-in">
+                    <div style="text-align:center; margin-top: 4rem; color: var(--text-muted);">
+                        <h2>Ledger / People</h2>
+                        <p>Track who owes you and whom you owe.</p>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

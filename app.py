@@ -1,4 +1,4 @@
-# app.py (with Ledger and Investments integrated)
+# app.py
 import streamlit as st
 
 from datetime import date as dt_date
